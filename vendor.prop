@@ -162,6 +162,7 @@ ro.oem_unlock_supported=1
 ro.vendor.extension_library=libqti-perfd-client.so
 
 ### RADIO
+rild.libpath=/vendor/lib64/libril-qc-hal-qmi.so
 DEVICE_PROVISIONED=1
 persist.vendor.data.iwlan.enable=true
 persist.vendor.data.mode=concurrent

@@ -35,6 +35,7 @@
 #
 # Make modem config folder and copy firmware config to that folder for RIL
 #
+mkdir -p /data/vendor/modem_config
 if [ -f /data/vendor/modem_config/ver_info.txt ]; then
     prev_version_info=`cat /data/vendor/modem_config/ver_info.txt`
 else

@@ -50,7 +50,9 @@ PRODUCT_ENFORCE_RRO_EXCLUDED_OVERLAYS += \
 
 ### Additional native libraries
 PRODUCT_COPY_FILES += \
-    $(PLATFORM_PATH)/config/public.libraries.txt:$(TARGET_COPY_OUT_VENDOR)/etc/public.libraries.txt
+    $(PLATFORM_PATH)/config/public.libraries.txt:$(TARGET_COPY_OUT_VENDOR)/etc/public.libraries.txt \
+    hardware/lineage/compat/vndk/v32/arm64/libhidlbase-v32.so:$(TARGET_COPY_OUT_SYSTEM)/lib64/libhidlbase-v32.so \
+    hardware/lineage/compat/vndk/v32/arm/libhidlbase-v32.so:$(TARGET_COPY_OUT_SYSTEM)/lib/libhidlbase-v32.so
 
 # extra build signature private vendor
 -include vendor/lineage-priv/keys/keys.mk
