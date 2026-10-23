@@ -10,7 +10,7 @@ on:
       DEVICE_TREE:
         description: 'Device Tree Repository'
         required: true
-        default: 'https://github.com/whatawurst/android_device_sony_maple'
+        default: 'https://github.com/tungtx57-pixel/android_device_sony_maple'
       DEVICE_TREE_BRANCH:
         description: 'Device Tree Branch'
         required: true
@@ -18,7 +18,7 @@ on:
       COMMON_TREE:
         description: 'Common Device Tree Repository'
         required: true
-        default: 'https://github.com/whatawurst/android_device_sony_yoshino-common'
+        default: 'https://github.com/tungtx57-pixel/android_device_sony_yoshino-common'
       COMMON_TREE_BRANCH:
         description: 'Common Device Tree Branch'
         required: true
@@ -138,6 +138,11 @@ jobs:
           export OF_PATCH_AVB20=1
           export OF_SUPPORT_ALL_BLOCK_OTA_UPDATES=1
           export OF_FIX_OTA_UPDATE_MANUAL_FLASHING=1
+
+          # Enforce Keymaster 3.0 for MSM8998
+          export OF_DEFAULT_KEYMASTER_VERSION="3.0"
+          export TW_FORCE_KEYMASTER_VER="true"
+
 
           EOF
           chmod +x vendorsetup.sh
