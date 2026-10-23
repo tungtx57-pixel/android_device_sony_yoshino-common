@@ -133,7 +133,7 @@ jobs:
           export OF_NO_TREBLE_COMPATIBILITY_CHECK=1
           export OF_SKIP_ORANGEFOX_PROCESS=0
           export FOX_USE_TWRP_RECOVERY_IMAGE_BUILDER=1
-          export FOX_ADVANCED_SECURITY=1
+          export OF_ADVANCED_SECURITY
           export FOX_ENABLE_APP_MANAGER=1
           export OF_PATCH_AVB20=1
           export OF_SUPPORT_ALL_BLOCK_OTA_UPDATES=1
