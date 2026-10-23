@@ -10,7 +10,7 @@ on:
       DEVICE_TREE:
         description: 'Device Tree Repository'
         required: true
-        default: 'https://github.com/tungtx57-pixel/android_device_sony_yoshino-common'
+        default: 'https://github.com/whatawurst/android_device_sony_maple'
       DEVICE_TREE_BRANCH:
         description: 'Device Tree Branch'
         required: true
@@ -18,7 +18,7 @@ on:
       COMMON_TREE:
         description: 'Common Device Tree Repository'
         required: true
-        default: 'https://github.com/tungtx57-pixel/android_device_sony_yoshino-common'
+        default: 'https://github.com/whatawurst/android_device_sony_yoshino-common'
       COMMON_TREE_BRANCH:
         description: 'Common Device Tree Branch'
         required: true
@@ -91,9 +91,9 @@ jobs:
       - name: Sync OrangeFox R12.1 Source Tree
         run: |
           mkdir -p $GITHUB_WORKSPACE/fox_12.1
-          cd $GITHUB_WORKSPACE/fox_12.1
           git clone https://gitlab.com/OrangeFox/sync.git ~/orangefox_sync
-          bash ~/orangefox_sync/orangefox_sync.sh --branch ${{ github.event.inputs.FOX_BRANCH }} --path $GITHUB_WORKSPACE/fox_12.1
+          cd ~/orangefox_sync
+          bash orangefox_sync.sh --branch ${{ github.event.inputs.FOX_BRANCH }} --path $GITHUB_WORKSPACE/fox_12.1
 
       - name: Clone Device and Common Trees
         run: |
@@ -108,6 +108,7 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/fox_12.1/device/sony/${{ github.event.inputs.DEVICE_NAME }}
           
+          # Ensure vendorsetup.sh exists with necessary OrangeFox R12 build flags
           cat << 'EOF' >> vendorsetup.sh
 
           # OrangeFox specific settings for Sony Xperia XZ Premium (maple)
@@ -180,6 +181,7 @@ jobs:
           # Copy Boot Image
           cp -v $OUTPUT_DIR/boot.img $DEST_DIR/ 2>/dev/null || true
 
+          # Check if anything was copied
           COUNT=$(ls -1 $DEST_DIR | wc -l)
           if [ "$COUNT" -eq "0" ]; then
             echo "ERROR: No build output files found!"
@@ -206,9 +208,21 @@ jobs:
             ## OrangeFox Recovery R12.1 (fox_12.1)
             - **Device**: Sony Xperia XZ Premium (`${{ github.event.inputs.DEVICE_NAME }}`)
             - **Platform**: Yoshino (Qualcomm Snapdragon 835 MSM8998)
-            - **Common Tree**: [android_device_sony_yoshino-common](<${{ github.event.inputs.COMMON_TREE }}>) (`${{ github.event.inputs.COMMON_TREE_BRANCH }}`)
-            - **Device Tree**: [android_device_sony_maple](<${{ github.event.inputs.DEVICE_TREE }}>) (`${{ github.event.inputs.DEVICE_TREE_BRANCH }}`)
+            - **Common Tree**: [android_device_sony_yoshino-common](${{ github.event.inputs.COMMON_TREE }}) (`${{ github.event.inputs.COMMON_TREE_BRANCH }}`)
+            - **Device Tree**: [android_device_sony_maple](${{ github.event.inputs.DEVICE_TREE }}) (`${{ github.event.inputs.DEVICE_TREE_BRANCH }}`)
             - **Maintainer**: Legends08
+            
+            ### Flash Instructions:
+            1. **Fastboot**:
+               ```bash
+               fastboot flash recovery recovery.img
+               # Hoặc flash vào FOTAKernel (Sony recovery partition):
+               fastboot flash FOTAKernel recovery.img
+               # Hoặc boot tạm thời để test:
+               fastboot boot recovery.img
+               ```
+            2. **Recovery (TWRP/OrangeFox Zip)**:
+               - Flash file `OrangeFox-*.zip` trực tiếp từ TWRP/OrangeFox đang chạy.
           files: build_output/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
