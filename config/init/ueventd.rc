@@ -339,6 +339,9 @@ firmware_directories /vendor/firmware_mnt/image/
 
 # Framebuffer for Dynamic Resolution Switch
 /sys/devices/virtual/graphics/fb0 mode        0664 system graphics
+/sys/devices/virtual/graphics/fb0 modes       0664 system graphics
+/sys/class/graphics/fb0           mode        0664 system graphics
+/sys/class/graphics/fb0           modes       0664 system graphics
 
 # Thermal
 /sys/module/msm_performance/parameters cpu_max_freq   0664 system system

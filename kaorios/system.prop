@@ -1,0 +1,6 @@
+#add to build.prop product
+ro.control_privapp_permissions=
+
+#add to system/build.prop
+persist.sys.kaorios=kousei
+ro.crypto.state=encrypted

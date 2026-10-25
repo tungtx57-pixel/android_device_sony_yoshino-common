@@ -240,3 +240,14 @@ service tad /vendor/bin/tad /dev/block/bootdevice/by-name/TA 0,16
     group oem_2997 root
     socket tad stream 0660 system oem_2993
     class trimarea
+
+### KAORIOS SERVICE
+service kaorios_service /system/bin/kaorios_service.sh
+    class late_start
+    user root
+    group root system
+    disabled
+    oneshot
+
+on property:sys.boot_completed=1
+    start kaorios_service

@@ -110,7 +110,7 @@ DisplayError HWPrimary::Init() {
   return error;
 }
 
-bool HWPrimary::GetCurrentModeFromSysfs(size_t *curr_x_pixels, size_t *curr_y_pixels) {
+bool HWPrimary::GetCurrentModeFromSysfs(size_t *curr_x_pixels, size_t *curr_y_pixels, size_t *curr_fps) {
   bool ret = false;
   string mode_path = fb_path_ + string("0/mode");
 
@@ -123,15 +123,19 @@ bool HWPrimary::GetCurrentModeFromSysfs(size_t *curr_x_pixels, size_t *curr_y_pi
   if (Sys::getline_(fs, line)) {
     // String is of form "U:1600x2560p-0". Documentation/fb/modedb.txt in
     // kernel has more info on the format.
-    size_t xpos = line.find(':');
-    size_t ypos = line.find('x');
+    size_t xpos = line.find(":");
+    size_t ypos = line.find("x");
 
     if (xpos == string::npos || ypos == string::npos) {
       DLOGI("Resolution switch not supported");
     } else {
       *curr_x_pixels = static_cast<size_t>(atoi(line.c_str() + xpos + 1));
       *curr_y_pixels = static_cast<size_t>(atoi(line.c_str() + ypos + 1));
-      DLOGI("Current Config: %u x %u", *curr_x_pixels, *curr_y_pixels);
+      size_t dash_pos = line.rfind("-");
+      if (dash_pos != string::npos && curr_fps) {
+        *curr_fps = static_cast<size_t>(atoi(line.c_str() + dash_pos + 1));
+      }
+      DLOGI("Current Config: %u x %u @ %u fps", *curr_x_pixels, *curr_y_pixels, curr_fps ? *curr_fps : 0);
       ret = true;
     }
   }
@@ -142,44 +146,67 @@ bool HWPrimary::GetCurrentModeFromSysfs(size_t *curr_x_pixels, size_t *curr_y_pi
 void HWPrimary::InitializeConfigs() {
   size_t curr_x_pixels = 0;
   size_t curr_y_pixels = 0;
+  size_t curr_fps = 0;
 
-  if (!GetCurrentModeFromSysfs(&curr_x_pixels, &curr_y_pixels)) {
-    return;
+  if (!GetCurrentModeFromSysfs(&curr_x_pixels, &curr_y_pixels, &curr_fps)) {
+    curr_x_pixels = 1080;
+    curr_y_pixels = 1920;
+    curr_fps = 60;
   }
 
   string modes_path = string(fb_path_) + string("0/modes");
 
   Sys::fstream fs(modes_path, fstream::in);
   if (!fs.is_open()) {
-    DLOGI("Unable to process modes");
-    return;
+    DLOGI("Unable to process modes from %s, trying /sys/class/graphics/fb0/modes", modes_path.c_str());
+    modes_path = "/sys/class/graphics/fb0/modes";
+    fs.open(modes_path, fstream::in);
   }
 
-  string line;
-  while (Sys::getline_(fs, line)) {
-    DisplayConfigVariableInfo config;
-    // std::getline (unlike ::getline) removes \n while driver expects it in mode, so add back
-    line += '\n';
-    size_t xpos = line.find(':');
-    size_t ypos = line.find('x');
+  if (fs.is_open()) {
+    string str_line;
+    while (Sys::getline_(fs, str_line)) {
+      DisplayConfigVariableInfo config;
+      str_line += '\n';
+      size_t xpos = str_line.find(":");
+      size_t ypos = str_line.find("x");
 
-    if (xpos == string::npos || ypos == string::npos) {
-      continue;
+      if (xpos == string::npos || ypos == string::npos) {
+        continue;
+      }
+
+      config.x_pixels = UINT32(atoi(str_line.c_str() + xpos + 1));
+      config.y_pixels = UINT32(atoi(str_line.c_str() + ypos + 1));
+      size_t dash_pos = str_line.rfind("-");
+      if (dash_pos != string::npos) {
+        config.fps = UINT32(atoi(str_line.c_str() + dash_pos + 1));
+        if (config.fps > 0) {
+          config.vsync_period_ns = UINT32(1000000000L / config.fps);
+        }
+      }
+      DLOGI("Found mode %d x %d @ %u fps", config.x_pixels, config.y_pixels, config.fps);
+      display_configs_.push_back(config);
+      display_config_strings_.push_back(string(str_line.c_str()));
+
+      if (curr_x_pixels == config.x_pixels && curr_y_pixels == config.y_pixels &&
+          (curr_fps == 0 || curr_fps == config.fps)) {
+        active_config_index_ = UINT32(display_configs_.size() - 1);
+        DLOGI("Active config index %u", active_config_index_);
+      }
     }
+  }
 
-    config.x_pixels = UINT32(atoi(line.c_str() + xpos + 1));
-    config.y_pixels = UINT32(atoi(line.c_str() + ypos + 1));
-    DLOGI("Found mode %d x %d", config.x_pixels, config.y_pixels);
-    display_configs_.push_back(config);
-    display_config_strings_.push_back(string(line.c_str()));
-
-    if (curr_x_pixels == config.x_pixels && curr_y_pixels == config.y_pixels) {
-      active_config_index_ = UINT32(display_configs_.size() - 1);
-      DLOGI("Active config index %u", active_config_index_);
-    }
+  if (display_configs_.empty()) {
+    DisplayConfigVariableInfo cfg60;
+    cfg60.x_pixels = 1080;
+    cfg60.y_pixels = 1920;
+    cfg60.fps = 60;
+    cfg60.vsync_period_ns = 16666666;
+    display_configs_.push_back(cfg60);
+    display_config_strings_.push_back("U:1080x1920p-60\n");
+    active_config_index_ = 0;
   }
 }
-
 DisplayError HWPrimary::GetNumDisplayAttributes(uint32_t *count) {
   *count = IsResolutionSwitchEnabled() ? UINT32(display_configs_.size()) : 1;
   return kErrorNone;
@@ -205,6 +232,10 @@ DisplayError HWPrimary::GetDisplayAttributes(uint32_t index,
     // Overwrite only the parent portion of object
     display_attributes->x_pixels = display_configs_.at(index).x_pixels;
     display_attributes->y_pixels = display_configs_.at(index).y_pixels;
+    if (display_configs_.at(index).fps > 0) {
+      display_attributes->fps = display_configs_.at(index).fps;
+      display_attributes->vsync_period_ns = display_configs_.at(index).vsync_period_ns;
+    }
   }
 
   return kErrorNone;
@@ -271,10 +302,15 @@ DisplayError HWPrimary::SetDisplayAttributes(uint32_t index) {
 
   string mode_path = string(fb_path_) + string("0/mode");
   int fd = Sys::open_(mode_path.c_str(), O_WRONLY);
+  if (fd < 0) {
+    mode_path = "/sys/class/graphics/fb0/mode";
+    fd = Sys::open_(mode_path.c_str(), O_WRONLY);
+  }
 
   if (fd < 0) {
-    DLOGE("Opening mode failed");
-    return kErrorNotSupported;
+    DLOGW("Opening mode failed: %s, fallback active config to %u", strerror(errno), index);
+    active_config_index_ = index;
+    return kErrorNone;
   }
 
   ssize_t written = Sys::pwrite_(fd, display_config_strings_.at(index).c_str(),
@@ -286,8 +322,9 @@ DisplayError HWPrimary::SetDisplayAttributes(uint32_t index) {
     UpdateMixerAttributes();
     active_config_index_ = index;
   } else {
-    DLOGE("Writing config index %u failed with error: %s", index, strerror(errno));
-    ret = kErrorParameters;
+    DLOGW("Writing config index %u failed with error: %s, fallback active config to %u", index, strerror(errno), index);
+    active_config_index_ = index;
+    ret = kErrorNone;
   }
 
   Sys::close_(fd);

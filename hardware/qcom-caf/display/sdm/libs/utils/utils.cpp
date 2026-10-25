@@ -64,8 +64,7 @@ void CloseFd(int *fd) {
 }
 
 DriverType GetDriverType() {
-    const char *fb_caps = "/sys/devices/virtual/graphics/fb0/mdp/caps";
-    // 0 - File exists
-    return Sys::access_(fb_caps, F_OK) ? DriverType::DRM : DriverType::FB;
+    // Sony MSM8998 (Yoshino/Maple) 4.4 kernel is FBDEV only, never DRM
+    return DriverType::FB;
 }
 }  // namespace sdm

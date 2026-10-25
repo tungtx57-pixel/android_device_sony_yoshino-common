@@ -206,4 +206,7 @@
     <array name="config_sfps_sensor_props" translatable="false">
         <item>@array/config_sfps_sensor_props_0</item>
     </array>
+    <!-- Refresh rate configuration -->
+    <integer name="config_defaultRefreshRate">60</integer>
+    <integer name="config_defaultPeakRefreshRate">60</integer>
 </resources>

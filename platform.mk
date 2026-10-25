@@ -63,3 +63,32 @@ TARGET_USE_CUSTOM_POWERHINT ?= false
 
 ### RECOVERY
 include $(PLATFORM_PATH)/platform/*.mk
+
+### Kaorios Toolbox
+PRODUCT_BROKEN_VERIFY_USES_LIBRARIES := true
+PRODUCT_PACKAGES += KaoriosToolbox
+
+PRODUCT_COPY_FILES += \
+    $(PLATFORM_PATH)/kaorios/system/priv-app/KaoriosToolbox/lib/arm64/libandroidx.graphics.path.so:$(TARGET_COPY_OUT_SYSTEM)/priv-app/KaoriosToolbox/lib/arm64/libandroidx.graphics.path.so \
+    $(PLATFORM_PATH)/kaorios/system/priv-app/KaoriosToolbox/lib/arm64/libdatastore_shared_counter.so:$(TARGET_COPY_OUT_SYSTEM)/priv-app/KaoriosToolbox/lib/arm64/libdatastore_shared_counter.so \
+    $(PLATFORM_PATH)/kaorios/system/priv-app/KaoriosToolbox/lib/arm64/libkaorios_toolbox.so:$(TARGET_COPY_OUT_SYSTEM)/priv-app/KaoriosToolbox/lib/arm64/libkaorios_toolbox.so \
+    $(PLATFORM_PATH)/kaorios/system/etc/permissions/com.kousei.kaorios.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/com.kousei.kaorios.xml \
+    $(PLATFORM_PATH)/kaorios/service.sh:$(TARGET_COPY_OUT_SYSTEM)/bin/kaorios_service.sh
+
+### ANDROID 16/17 FORWARD COMPATIBILITY
+PRODUCT_MAX_PAGE_SIZE_SUPPORTED := 4096
+PRODUCT_NO_BIONIC_PAGE_SIZE_MACRO := false
+PRODUCT_CHECK_PREBUILT_MAX_PAGE_SIZE := false
+
+# HIDL backward compatibility packages for Android 16/17
+PRODUCT_HIDL_ENABLED := true
+PRODUCT_PACKAGES += \
+    hwservicemanager \
+    android.hidl.base@1.0 \
+    android.hidl.base@1.0.vendor \
+    android.hidl.manager@1.0 \
+    android.hidl.manager@1.0.vendor \
+    libhidltransport \
+    libhidltransport.vendor \
+    libhwbinder \
+    libhwbinder.vendor

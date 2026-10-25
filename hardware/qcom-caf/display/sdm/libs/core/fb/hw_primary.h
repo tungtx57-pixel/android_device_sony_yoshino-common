@@ -78,7 +78,7 @@ class HWPrimary : public HWDevice {
   DisplayError PopulateDisplayAttributes();
   void InitializeConfigs();
   bool IsResolutionSwitchEnabled() { return !display_configs_.empty(); }
-  bool GetCurrentModeFromSysfs(size_t *curr_x_pixels, size_t *curr_y_pixels);
+  bool GetCurrentModeFromSysfs(size_t *curr_x_pixels, size_t *curr_y_pixels, size_t *curr_fps = nullptr);
   void UpdateMixerAttributes();
   void SetAVRFlags(const HWAVRInfo &hw_avr_info, uint32_t *avr_flags);
 

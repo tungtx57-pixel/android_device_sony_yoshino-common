@@ -832,6 +832,9 @@ HWC2::Error HWCDisplay::GetDisplayAttribute(hwc2_config_t config, HWC2::Attribut
     case HWC2::Attribute::DpiY:
       *out_value = INT32(variable_config.y_dpi * 1000.0f);
       break;
+    case HWC2::Attribute::ConfigGroup:
+      *out_value = 0;
+      break;
     default:
       DLOGW("Spurious attribute type = %s", to_string(attribute).c_str());
       *out_value = -1;

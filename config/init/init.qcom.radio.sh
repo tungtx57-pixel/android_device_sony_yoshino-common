@@ -54,3 +54,19 @@ if [ ! -f /vendor/firmware_mnt/verinfo/ver_info.txt -o "$prev_version_info" != "
 fi
 chmod g-w /data/vendor/modem_config
 setprop ro.vendor.ril.mbn_copy_completed 1
+
+# Fallback: ensure FSG partition has valid signed modem image
+FSG=/dev/block/bootdevice/by-name/fsg
+MODEMST1=/dev/block/bootdevice/by-name/modemst1
+MODEMST2=/dev/block/bootdevice/by-name/modemst2
+DEFAULT_MBN=/system/etc/customization/modem/default
+RESET_MBN=/system/etc/customization/modem/reset_modemst1
+
+if [ -f "$DEFAULT_MBN" ] && [ -b "$FSG" ]; then
+    MAGIC=$(dd if=$FSG bs=1 skip=40 count=6 2>/dev/null)
+    if [ "$MAGIC" != "IMGEFS" ]; then
+        dd if=$DEFAULT_MBN of=$FSG bs=4096 2>/dev/null
+        [ -f "$RESET_MBN" ] && dd if=$RESET_MBN of=$MODEMST1 bs=1024 2>/dev/null
+        [ -f "$RESET_MBN" ] && dd if=$RESET_MBN of=$MODEMST2 bs=1024 2>/dev/null
+    fi
+fi

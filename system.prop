@@ -218,3 +218,10 @@ persist.service.adb.enable=1
 persist.service.debuggable=1
 persist.sys.usb.config=mtp,adb
 # ro.debuggable=1
+
+### Android 16/17 Compatibility Overrides
+ro.gfx.angle.supported=false
+persist.graphics.egl=adreno
+ro.hardware.egl=adreno
+ro.hardware.vulkan=msm8998
+debug.sf.latch_unsignaled=1

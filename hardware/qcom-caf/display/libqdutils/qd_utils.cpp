@@ -277,9 +277,7 @@ int getDPTestConfig(uint32_t *panelBpp, uint32_t *patternType) {
 }
 
 DriverType getDriverType() {
-    const char *fb_caps = "/sys/devices/virtual/graphics/fb0/mdp/caps";
-    // 0 - File exists
-    return access(fb_caps, F_OK) ? DriverType::DRM : DriverType::FB;
+    return DriverType::FB;
 }
 
 const char *GetHALPixelFormatString(int format) {
