@@ -64,7 +64,8 @@ TARGET_USE_CUSTOM_POWERHINT ?= false
 ### RECOVERY
 include $(PLATFORM_PATH)/platform/*.mk
 
-### Kaorios Toolbox
+### Kaorios Toolbox (Conditional)
+ifneq ($(wildcard $(PLATFORM_PATH)/kaorios/system/priv-app/KaoriosToolbox/KaoriosToolbox.apk),)
 PRODUCT_BROKEN_VERIFY_USES_LIBRARIES := true
 PRODUCT_PACKAGES += KaoriosToolbox
 
@@ -74,6 +75,8 @@ PRODUCT_COPY_FILES += \
     $(PLATFORM_PATH)/kaorios/system/priv-app/KaoriosToolbox/lib/arm64/libkaorios_toolbox.so:$(TARGET_COPY_OUT_SYSTEM)/priv-app/KaoriosToolbox/lib/arm64/libkaorios_toolbox.so \
     $(PLATFORM_PATH)/kaorios/system/etc/permissions/com.kousei.kaorios.xml:$(TARGET_COPY_OUT_SYSTEM)/etc/permissions/com.kousei.kaorios.xml \
     $(PLATFORM_PATH)/kaorios/service.sh:$(TARGET_COPY_OUT_SYSTEM)/bin/kaorios_service.sh
+
+endif
 
 ### ANDROID 16/17 FORWARD COMPATIBILITY
 PRODUCT_MAX_PAGE_SIZE_SUPPORTED := 4096
