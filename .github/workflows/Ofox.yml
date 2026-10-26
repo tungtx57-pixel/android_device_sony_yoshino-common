@@ -143,6 +143,15 @@ jobs:
           export OF_DEFAULT_KEYMASTER_VERSION="3.0"
           export TW_FORCE_KEYMASTER_VER="true"
 
+          # Battery percentage fix for Sony Yoshino / MSM8998 (qpnp-fg-gen3)
+          export OF_USE_LEGACY_BATTERY_SERVICES=1
+          export TW_CUSTOM_BATTERY_PATH="/sys/class/power_supply/bms"
+
+          # USB-OTG & filesystem drivers
+          export TW_INCLUDE_NTFS_3G=true
+          export TW_INCLUDE_FUSE_EXFAT=true
+          export TW_INCLUDE_FUSE_NTFS=true
+
 
           EOF
           chmod +x vendorsetup.sh
