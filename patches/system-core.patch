@@ -1,0 +1,91 @@
+diff --git a/init/Android.bp b/init/Android.bp
+index 3cc123c4e8209a8a8465d57710ca8d2b3c6c0d39..be14985bb0b908e787752ab71916f56585bfb200 100644
+--- a/init/Android.bp
++++ b/init/Android.bp
+@@ -195,6 +195,7 @@ libinit_cc_defaults {
+         "libext4_utils",
+         "libfs_mgr",
+         "libgsi",
++        "libkeyutils",
+         "liblog",
+         "liblogwrap",
+         "liblp",
+diff --git a/init/builtins.cpp b/init/builtins.cpp
+index 38aed9c64c52737c2375e62dca99e6b33029fc42..a032de985e2f090a0b1cd5dd33c34754c4cafd44 100644
+--- a/init/builtins.cpp
++++ b/init/builtins.cpp
+@@ -1172,6 +1172,13 @@ static Result<void> do_init_user0(const BuiltinArguments& args) {
+     return ExecVdcRebootOnFailure("init_user0");
+ }
+ 
++static Result<void> do_install_keyring(const BuiltinArguments&) {
++    if (FscryptInstallKeyring() != 0) {
++        return Error() << "Failed to install legacy fscrypt keyring";
++    }
++    return {};
++}
++
+ static Result<void> do_mark_post_data(const BuiltinArguments& args) {
+     LOG(INFO) << "deprecated action `mark_post_data` called.";
+     return {};
+@@ -1304,6 +1311,7 @@ const BuiltinFunctionMap& GetBuiltinFunctionMap() {
+         {"init_user0",              {0,     0,    {false,  do_init_user0}}},
+         {"insmod",                  {1,     kMax, {true,   do_insmod}}},
+         {"installkey",              {1,     1,    {false,  do_installkey}}},
++        {"install_keyring",         {0,     0,    {false,  do_install_keyring}}},
+         {"interface_restart",       {1,     1,    {false,  do_interface_restart}}},
+         {"interface_start",         {1,     1,    {false,  do_interface_start}}},
+         {"interface_stop",          {1,     1,    {false,  do_interface_stop}}},
+diff --git a/init/fscrypt_init_extensions.cpp b/init/fscrypt_init_extensions.cpp
+index 6a561e54cc694cc7048d960969c1b0a976d804e8..b165da9b9a5d298ba6892a1946449baa71389d9d 100644
+--- a/init/fscrypt_init_extensions.cpp
++++ b/init/fscrypt_init_extensions.cpp
+@@ -34,12 +34,34 @@
+ #include <cutils/properties.h>
+ #include <cutils/sockets.h>
+ #include <fscrypt/fscrypt.h>
++#include <keyutils.h>
+ #include <logwrap/logwrap.h>
+ 
+ #define TAG "fscrypt"
+ 
+ using namespace android::fscrypt;
+ 
++int FscryptInstallKeyring() {
++    key_serial_t keyring = keyctl_search(KEY_SPEC_SESSION_KEYRING, "keyring", "fscrypt", 0);
++    if (keyring >= 0) {
++        LOG(INFO) << "Legacy fscrypt keyring already exists with id " << keyring;
++        return 0;
++    }
++    if (errno != ENOKEY) {
++        PLOG(ERROR) << "Failed to search for legacy fscrypt keyring";
++        return -1;
++    }
++
++    keyring = add_key("keyring", "fscrypt", nullptr, 0, KEY_SPEC_SESSION_KEYRING);
++    if (keyring == -1) {
++        PLOG(ERROR) << "Failed to create legacy fscrypt keyring";
++        return -1;
++    }
++    LOG(INFO) << "Created legacy fscrypt keyring with id " << keyring
++              << " in init process " << getpid();
++    return 0;
++}
++
+ // TODO(b/139378601): use a single central implementation of this.
+ static void delete_dir_contents(const std::string& dir) {
+     char* const paths[2] = {const_cast<char*>(dir.c_str()), nullptr};
+diff --git a/init/fscrypt_init_extensions.h b/init/fscrypt_init_extensions.h
+index 5e0269a3b096e167d7ecc76c15afdd221a4560f9..4c431e1e955a7c59c8ff42aaa0b4049a7e61deee 100644
+--- a/init/fscrypt_init_extensions.h
++++ b/init/fscrypt_init_extensions.h
+@@ -25,5 +25,9 @@ enum class FscryptAction {
+     kDeleteIfNecessary,
+ };
+ 
++// Creates the legacy session keyring used by kernels predating the fscrypt
++// add/remove-key ioctls.  Kept for recovery device rc compatibility.
++int FscryptInstallKeyring();
++
+ bool FscryptSetDirectoryPolicy(const std::string& ref_basename, FscryptAction action,
+                                const std::string& dir);

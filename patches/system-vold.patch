@@ -1,0 +1,138 @@
+diff --git a/Android.bp b/Android.bp
+index c06743bf3ea3ce163c3f4dac7a46c78b6ec93def..915848f9ff449f130edacd3ca72030c864d2098a 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -66,6 +66,7 @@ cc_defaults {
+         "libhardware_legacy",
+         "libincfs",
+         "libhidlbase",
++        "libkeyutils",
+         "libkeymint_support",
+         "liblogwrap",
+         "libselinux",
+@@ -343,7 +344,8 @@ cc_binary {
+     name: "fscryptpolicyget",
+     defaults: [
+         "vold_default_flags",
+-        "vold_default_libs"
++        "vold_default_libs",
++        "vold_defaults"
+     ],
+ 
+     srcs: ["fscryptpolicyget.cpp"],
+@@ -388,4 +390,4 @@ aconfig_declarations {
+ cc_aconfig_library {
+     name: "vold_flags_c_lib",
+     aconfig_declarations: "vold_flags",
+-}
+\ No newline at end of file
++}
+diff --git a/KeyUtil.cpp b/KeyUtil.cpp
+index 7cad609359f500991d71e82f1be6502947789093..2f39453542e3520830a629ebcdf41de2c023fd37 100644
+--- a/KeyUtil.cpp
++++ b/KeyUtil.cpp
+@@ -28,6 +28,7 @@
+ 
+ #include <android-base/file.h>
+ #include <android-base/logging.h>
++#include <keyutils.h>
+ 
+ #include "KeyStorage.h"
+ #include "Utils.h"
+@@ -101,6 +102,45 @@ static std::string keyrefstring(const std::string& raw_ref) {
+     return o.str();
+ }
+ 
++#ifdef USE_FSCRYPT_POLICY_V1
++static bool fillLegacyKey(const KeyBuffer& key, fscrypt_key* fs_key) {
++    if (key.size() != FSCRYPT_MAX_KEY_SIZE) {
++        LOG(ERROR) << "Wrong size legacy fscrypt key " << key.size();
++        return false;
++    }
++    fs_key->mode = 0;
++    fs_key->size = key.size();
++    memcpy(fs_key->raw, key.data(), key.size());
++    return true;
++}
++
++static bool installLegacyKey(const KeyBuffer& key, const std::string& raw_ref) {
++    key_serial_t keyring = keyctl_search(KEY_SPEC_SESSION_KEYRING, "keyring", "fscrypt", 0);
++    if (keyring == -1 && errno == ENOKEY) {
++        keyring = add_key("keyring", "fscrypt", nullptr, 0, KEY_SPEC_SESSION_KEYRING);
++    }
++    if (keyring == -1) {
++        PLOG(ERROR) << "Unable to find or create the legacy fscrypt keyring";
++        return false;
++    }
++
++    KeyBuffer key_buffer(sizeof(fscrypt_key), 0);
++    fscrypt_key& fs_key = *reinterpret_cast<fscrypt_key*>(key_buffer.data());
++    if (!fillLegacyKey(key, &fs_key)) return false;
++
++    static constexpr const char* kPrefixes[] = {"ext4", "f2fs", "fscrypt"};
++    for (const char* prefix : kPrefixes) {
++        const std::string description = prefix + std::string(":") + keyrefstring(raw_ref);
++        if (add_key("logon", description.c_str(), &fs_key, sizeof(fs_key), keyring) == -1) {
++            PLOG(ERROR) << "Failed to install legacy fscrypt key " << description;
++            return false;
++        }
++    }
++    LOG(INFO) << "Installed v1 fscrypt key through the legacy session keyring";
++    return true;
++}
++#endif
++
+ // Build a struct fscrypt_key_specifier for use in the key management ioctls.
+ static bool buildKeySpecifier(fscrypt_key_specifier* spec, const EncryptionPolicy& policy) {
+     switch (policy.options.version) {
+@@ -183,6 +223,12 @@ bool installKey(const std::string& mountpoint, const EncryptionOptions& options,
+     }
+ 
+     if (ioctl(fd, FS_IOC_ADD_ENCRYPTION_KEY, arg) != 0) {
++#ifdef USE_FSCRYPT_POLICY_V1
++        if (options.version == 1 && (errno == ENOTTY || errno == EOPNOTSUPP)) {
++            LOG(INFO) << "Kernel lacks filesystem key ioctls; using the v1 session keyring";
++            return installLegacyKey(key, policy->key_raw_ref);
++        }
++#endif
+         PLOG(ERROR) << "Failed to install fscrypt key to " << mountpoint;
+         return false;
+     }
+diff --git a/fscrypt_policy.cpp b/fscrypt_policy.cpp
+index e66dd99933369eede1ee98b74f5ba585071162f0..2dbb22303de7a06f1220d70bccd322b93ffbd936 100755
+--- a/fscrypt_policy.cpp
++++ b/fscrypt_policy.cpp
+@@ -138,6 +138,15 @@ extern "C" bool fscrypt_policy_get_struct(const char *directory, struct fscrypt_
+ //    if (android::vold::isFsKeyringSupported()) {
+         ex_policy.policy_size = sizeof(ex_policy.policy);
+         if (ioctl(fd, FS_IOC_GET_ENCRYPTION_POLICY_EX, &ex_policy) != 0) {
++#ifdef USE_FSCRYPT_POLICY_V1
++            if (ioctl(fd, FS_IOC_GET_ENCRYPTION_POLICY, fep) != 0) {
++                PLOG(ERROR) << "Failed to get legacy encryption policy for " << directory;
++                close(fd);
++                return false;
++            }
++            close(fd);
++            return true;
++#endif
+             PLOG(ERROR) << "Failed to get encryption policy for " << directory;
+             close(fd);
+             return false;
+@@ -195,4 +204,3 @@ extern "C" bool Set_Encryption_Policy(std::string path, struct fscrypt_policy_v2
+ 	return true;
+ }
+ #endif
+-
+diff --git a/soong/makevars.go b/soong/makevars.go
+index f453ed050821378879cb228191ef3a670c7ecbb4..acb138f6b116dbebf304639c0e1691a23191fe7d 100644
+--- a/soong/makevars.go
++++ b/soong/makevars.go
+@@ -5,7 +5,7 @@ import (
+ )
+ 
+ func getMakeVars(ctx android.BaseContext, mVar string) string {
+-	makeVars := ctx.Config().VendorConfig("makeVarsPlugin")
++	makeVars := ctx.Config().VendorConfig("twrpVarsPlugin")
+ 	var makeVar = ""
+ 	if makeVars.IsSet(mVar) {
+ 		makeVar = makeVars.String(mVar)

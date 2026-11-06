@@ -1,20 +1,31 @@
 #
 # Copyright (C) 2017 The Android Open Source Project
+# Copyright (C) 2026 AERA Recovery Project
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 #
 
+LOCAL_PATH := device/sony/yoshino-common
 PLATFORM_PATH := device/sony/yoshino-common
 
-PRODUCT_SOONG_NAMESPACES += \
-    $(PLATFORM_PATH)
+# Dynamic Partitions
+PRODUCT_USE_DYNAMIC_PARTITIONS := false
+
+# Keep 4 KiB-aligned vendor recovery blobs buildable with the legacy 4.4 kernel on Android 16
+PRODUCT_CHECK_PREBUILT_MAX_PAGE_SIZE := false
+
+# Inherit from hardware-specific part of the product configuration
+$(call inherit-product-if-exists, $(PLATFORM_PATH)/vendor_blobs.mk)
+
+# QCOM FBE Decryption packages
+PRODUCT_PACKAGES += \
+    qcom_decrypt \
+    qcom_decrypt_fbe
+
+# Processgroup task profiles required by Android 16 recovery init
+PRODUCT_COPY_FILES += \
+    system/core/libprocessgroup/profiles/task_profiles.json:$(TARGET_COPY_OUT_RECOVERY)/root/system/etc/task_profiles.json
+
+# Adreno 540 EGL hardware property
+PRODUCT_VENDOR_PROPERTIES += \
+    ro.hardware.egl=adreno

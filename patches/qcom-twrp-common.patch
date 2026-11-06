@@ -1,0 +1,14 @@
+diff --git a/crypto_fbe/init.recovery.qcom_decrypt.fbe.rc b/crypto_fbe/init.recovery.qcom_decrypt.fbe.rc
+index 95f35c8292e267d93720f981a4c39a2547fa7723..fb072731b00afc435985cf5317026d3f45578e7d 100644
+--- a/crypto_fbe/init.recovery.qcom_decrypt.fbe.rc
++++ b/crypto_fbe/init.recovery.qcom_decrypt.fbe.rc
+@@ -1,6 +1,8 @@
+ import /init.recovery.services.qcom_decrypt.fbe.rc
+ 
+-on property:ro.crypto.state=encrypted && property:ro.crypto.type=file
++# Legacy v1 fscrypt kernels require this session keyring to exist before
++# recovery is forked so every recovery thread inherits it.
++on early-init
+     install_keyring
+ 
+ on property:vendor.sys.listeners.registered=true

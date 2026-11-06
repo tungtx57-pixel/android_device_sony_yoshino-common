@@ -1,21 +1,28 @@
 #
 # Copyright (C) 2017 The Android Open Source Project
+# Copyright (C) 2026 AERA Recovery Project
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#      http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-License-Identifier: Apache-2.0
 #
 
 LOCAL_PATH := $(call my-dir)
 
-ifneq ($(filter lilac maple maple_dsds poplar poplar_canada poplar_dsds poplar_kddi, $(TARGET_DEVICE)),)
+ifneq ($(filter lilac maple maple_dsds poplar poplar_canada poplar_dsds poplar_kddi,$(TARGET_DEVICE)),)
+
 include $(call all-subdir-makefiles,$(LOCAL_PATH))
+
+# Sony Yoshino's recovery partition is a fixed 64 MiB boot image slot.
+# Drop the optional rclone binary immediately before mkbootfs packs the
+# recovery CPIO so the offline AERA recovery image stays within the 64 MiB
+# hardware partition budget unless AERA_KEEP_RCLONE=1 is explicitly set.
+ifneq ($(AERA_KEEP_RCLONE),1)
+YOSHINO_RECOVERY_RAMDISK_STAMP := \
+    $(PRODUCT_OUT)/obj/PACKAGING/recovery_intermediates/ramdisk_files-timestamp
+$(YOSHINO_RECOVERY_RAMDISK_STAMP): yoshino_trim_recovery_ramdisk
+
+.PHONY: yoshino_trim_recovery_ramdisk
+yoshino_trim_recovery_ramdisk: $(TARGET_RECOVERY_ROOT_OUT)/system/bin/rclone
+	@rm -f $(TARGET_RECOVERY_ROOT_OUT)/system/bin/rclone
+endif
+
 endif
