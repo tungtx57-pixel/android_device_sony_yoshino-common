@@ -13,6 +13,9 @@
 #   3. Single-language font pack optimization in
 #      bootable/recovery/aeraui/build/aeraui_defaults.go to keep recovery.img
 #      well within Sony Yoshino's 64 MiB recovery partition.
+#   4. Go runtime memory cap (11 GiB GOMEMLIMIT + GOGC=40) in
+#      build/soong/cmd/soong_build/main.go so soong_build (invoked via env -i)
+#      never thrashes swap or triggers OOM on 16 GiB CI runners.
 #
 
 set -euo pipefail
@@ -107,5 +110,32 @@ if old_snippet in content and "Roboto-Regular.ttf" not in content:
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     print("[yoshino-patches] Optimized single-language font copy in aeraui_defaults.go")
+PYEOF
+fi
+
+# Cap soong_build Go heap memory so env -i "$BUILDER" never swap-thrashes or OOMs on 16 GiB CI runners
+SOONG_MAIN_GO="${TREE_ROOT}/build/soong/cmd/soong_build/main.go"
+if [ -f "${SOONG_MAIN_GO}" ]; then
+	python3 - "${SOONG_MAIN_GO}" << 'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+if "debug.SetMemoryLimit" not in content:
+    content = content.replace(
+        '\t"path/filepath"\n',
+        '\t"path/filepath"\n\t"runtime/debug"\n',
+        1,
+    )
+    content = content.replace(
+        "func main() {\n\tflag.Parse()",
+        "func main() {\n\tdebug.SetGCPercent(40)\n\tdebug.SetMemoryLimit(11 * 1024 * 1024 * 1024)\n\tflag.Parse()",
+        1,
+    )
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("[yoshino-patches] Injected 11 GiB memory limit and GOGC=40 into soong_build/main.go")
 PYEOF
 fi

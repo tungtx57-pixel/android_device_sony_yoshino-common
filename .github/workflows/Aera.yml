@@ -68,22 +68,36 @@ jobs:
           ref: ${{ inputs.YOSHINO_BRANCH || 'aera-16.0' }}
           path: yoshino-common-repo
 
-      - name: Maximize Runner Disk Space & Configure 16G Swap
+      - name: Maximize Runner Disk Space & Configure ZRAM + Swap
         run: |
           df -h
           sudo rm -rf \
             /usr/share/dotnet \
             /usr/local/lib/android \
             /opt/ghc \
-            /opt/hostedtoolcache/CodeQL \
+            /opt/hostedtoolcache \
             /usr/local/share/boost \
             /usr/local/graalvm \
-            /usr/local/share/chromium
-          sudo docker image prune --all --force || true
+            /usr/local/share/chromium \
+            /usr/local/share/powershell \
+            /usr/share/swift \
+            /usr/lib/jvm/temurin-* \
+            /usr/local/sqlpackage
+          sudo docker system prune --all --force --volumes || true
           sudo apt-get clean
 
           sudo swapoff -a || true
           sudo rm -f /swapfile /mnt/swapfile
+
+          # 1. Setup 8 GiB ZRAM (high-priority in-RAM compressed swap, pri=100)
+          if sudo modprobe zram num_devices=1 2>/dev/null; then
+            echo lz4 | sudo tee /sys/block/zram0/comp_algorithm 2>/dev/null || true
+            echo 8G | sudo tee /sys/block/zram0/disksize
+            sudo mkswap /dev/zram0
+            sudo swapon -p 100 /dev/zram0
+          fi
+
+          # 2. Setup 16 GiB fallback disk swap (low-priority, pri=10)
           SWAP_PATH="/mnt/swapfile"
           if ! sudo fallocate -l 16G "${SWAP_PATH}" 2>/dev/null; then
             SWAP_PATH="/swapfile"
@@ -91,10 +105,11 @@ jobs:
           fi
           sudo chmod 600 "${SWAP_PATH}"
           sudo mkswap "${SWAP_PATH}"
-          sudo swapon "${SWAP_PATH}"
-          sudo sysctl vm.swappiness=60
+          sudo swapon -p 10 "${SWAP_PATH}"
+          sudo sysctl vm.swappiness=10
           df -h
           free -h
+          swapon --show
 
       - name: Install AOSP 16 / AERA Build Dependencies
         run: |
@@ -123,13 +138,31 @@ jobs:
           repo init \
             -u https://github.com/AERA-Recovery/android_manifest.git \
             -b "${{ inputs.AERA_BRANCH || 'aera-16.0' }}" \
+            -g default,-mips,-darwin,-notdefault \
             --depth=1 \
             --git-lfs
+
+          # Exclude unused prebuilt GKI kernels and ABI dumps left in default.xml
+          mkdir -p .repo/local_manifests
+          cat > .repo/local_manifests/slim_ci.xml << 'XMLEOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <manifest>
+            <remove-project path="kernel/prebuilts/6.1/arm64" />
+            <remove-project path="kernel/prebuilts/6.6/arm64" />
+            <remove-project path="kernel/prebuilts/6.12/arm64" />
+            <remove-project path="kernel/prebuilts/common-modules/trusty/6.6/arm64" />
+            <remove-project path="kernel/prebuilts/common-modules/trusty/6.12/arm64" />
+            <remove-project path="prebuilts/abi-dumps/ndk" />
+            <remove-project path="prebuilts/abi-dumps/platform" />
+            <remove-project path="prebuilts/abi-dumps/vndk" />
+            <remove-project path="prebuilts/bazel/darwin-x86_64" />
+          </manifest>
+          XMLEOF
 
           repo sync -c -j"$(nproc --all)" --force-sync --no-clone-bundle --no-tags || \
             repo sync -c -j4 --force-sync --no-clone-bundle --no-tags
 
-      - name: Setup Sony Yoshino Device Trees & Apply MSM8998 Patches
+      - name: Setup Sony Yoshino Device Trees, Apply Patches & Reclaim .repo Space
         run: |
           cd "${GITHUB_WORKSPACE}/aera"
 
@@ -142,6 +175,7 @@ jobs:
 
           # Copy the remade yoshino-common repository checked out by this workflow
           cp -a "${GITHUB_WORKSPACE}/yoshino-common-repo" "device/sony/yoshino-common"
+          rm -rf "${GITHUB_WORKSPACE}/yoshino-common-repo"
 
           # Clone target device tree (maple / poplar / lilac)
           git clone --depth=1 -b "${DEVICE_BRANCH}" "${DEVICE_TREE}" "device/sony/${DEVICE_NAME}"
@@ -200,15 +234,23 @@ jobs:
                   rc = f.read()
               if "init.recovery.qcom_decrypt.rc" not in rc:
                   rc = "import /init.recovery.qcom_decrypt.rc\n\n" + rc
-              # Remove obsolete /sbin/qseecomd service block that conflicts with qcom_decrypt
               rc = rc.replace("    start sbinqseecomd\n", "")
               with open(qcom_rc, "w", encoding="utf-8") as f:
                   f.write(rc)
               print(f"[setup] Normalized {qcom_rc} for QCOM FBE decryption")
           PYEOF
 
-          # Apply MSM8998 Linux 4.4 fscrypt v1 and 64 MiB font budget patches
+          # Apply MSM8998 Linux 4.4 fscrypt v1, 64 MiB font budget, and soong_build 11 GiB memory cap patches
           bash "device/sony/yoshino-common/patches/apply.sh" "${GITHUB_WORKSPACE}/aera"
+
+          # Make bootable/recovery/.git standalone so git revision queries work, then remove .repo (~42 GB freed)
+          if [ -d "bootable/recovery/.git" ]; then
+            cp -RL "bootable/recovery/.git" "bootable/recovery/.git_standalone"
+            rm -rf "bootable/recovery/.git"
+            mv "bootable/recovery/.git_standalone" "bootable/recovery/.git"
+          fi
+          rm -rf .repo
+          df -h
 
       - name: Build AERA Recovery
         run: |
@@ -219,6 +261,8 @@ jobs:
 
           export ALLOW_MISSING_DEPENDENCIES=true
           export LC_ALL="C"
+          export GOGC=40
+          export GOMEMLIMIT=11GiB
           export AERA_BUILD_DEVICE="${DEVICE_NAME}"
           export AERA_MAINTAINER="${{ inputs.MAINTAINER || 'tungtx57-pixel' }}"
           if [ "${{ inputs.ENABLE_ROOT_MANAGER }}" = "true" ]; then
