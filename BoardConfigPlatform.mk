@@ -20,6 +20,7 @@ BUILD_BROKEN_PLUGIN_VALIDATION := \
 ### BOARD & PLATFORM
 BOARD_USES_QCOM_HARDWARE := true
 BOARD_VENDOR := sony
+TARGET_NO_BOOTLOADER ?= true
 TARGET_BOARD_PLATFORM := msm8998
 TARGET_BOARD_PLATFORM_GPU := qcom-adreno540
 QCOM_BOARD_PLATFORMS += msm8998
@@ -40,11 +41,10 @@ TARGET_2ND_CPU_ABI2 := armeabi
 TARGET_2ND_CPU_VARIANT := generic
 TARGET_2ND_CPU_VARIANT_RUNTIME := cortex-a73
 
-TARGET_USES_64_BIT_BINDER := true
-
 ### KERNEL & BOOT IMAGE
 TARGET_KERNEL_ARCH := arm64
 TARGET_KERNEL_HEADER_ARCH := arm64
+BOARD_KERNEL_IMAGE_NAME ?= Image.gz-dtb
 
 BOARD_KERNEL_CMDLINE += user_debug=31
 BOARD_KERNEL_CMDLINE += ehci-hcd.park=3
@@ -63,6 +63,7 @@ BOARD_KERNEL_BASE := 0x00000000
 BOARD_KERNEL_PAGESIZE := 4096
 BOARD_BOOT_HEADER_VERSION ?= 0
 BOARD_MKBOOTIMG_ARGS += --header_version $(BOARD_BOOT_HEADER_VERSION)
+BOARD_MKBOOTIMG_ARGS += --pagesize $(BOARD_KERNEL_PAGESIZE)
 
 ### PARTITIONS & FILESYSTEMS
 # Fixed 64 MiB boot and recovery slots on Sony Yoshino (MSM8998)
@@ -107,28 +108,25 @@ SOONG_CONFIG_twrpVarsPlugin += TW_USE_FSCRYPT_POLICY
 SOONG_CONFIG_twrpVarsPlugin_TW_USE_FSCRYPT_POLICY := $(TW_USE_FSCRYPT_POLICY)
 
 ### RECOVERY MODULES & RELINK LIBRARIES
+# Note: libicuuc and libxml2 are already installed natively into recovery via
+# libandroidicu.recovery / recovery shared libs; on Android 16 libicuuc is
+# APEX-only on /system so $(TARGET_OUT_SHARED_LIBRARIES)/libicuuc.so must not
+# be listed in relink prerequisites.
 TARGET_RECOVERY_DEVICE_MODULES += \
     android.hardware.boot-V1-ndk \
     android.hardware.keymaster@3.0-impl \
     android.hardware.weaver@1.0 \
     libboot_control_client \
-    libicuuc \
     libkeymaster3device \
-    libpuresoftkeymasterdevice \
-    libxml2
+    libpuresoftkeymasterdevice
 
 AERA_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES += \
-    $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.boot-V1-ndk.so \
-    $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.weaver@1.0.so \
-    $(TARGET_OUT_SHARED_LIBRARIES)/libboot_control_client.so \
-    $(TARGET_OUT_SHARED_LIBRARIES)/libicuuc.so \
+    $(TARGET_OUT_VENDOR_SHARED_LIBRARIES)/hw/android.hardware.keymaster@3.0-impl.so \
     $(TARGET_OUT_SHARED_LIBRARIES)/libkeymaster3device.so \
     $(TARGET_OUT_SHARED_LIBRARIES)/libpuresoftkeymasterdevice.so \
-    $(TARGET_OUT_SHARED_LIBRARIES)/libxml2.so \
-    $(TARGET_OUT_VENDOR_SHARED_LIBRARIES)/hw/android.hardware.keymaster@3.0-impl.so
-
-TW_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES += \
-    $(AERA_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES)
+    $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.boot-V1-ndk.so \
+    $(TARGET_OUT_SHARED_LIBRARIES)/libboot_control_client.so \
+    $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.weaver@1.0.so
 
 ### INIT & USB
 AERA_EXCLUDE_DEFAULT_USB_INIT := true
