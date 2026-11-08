@@ -1,3 +1,16 @@
+diff --git a/aera_build.mk b/aera_build.mk
+index e8bce39..5207392 100644
+--- a/aera_build.mk
++++ b/aera_build.mk
+@@ -166,7 +166,7 @@ endif
+ 
+ # stable builds - enable advanced security
+ ifeq ($(AERA_BUILD_TYPE),Stable)
+-    OF_ADVANCED_SECURITY := 1
++    # OF_ADVANCED_SECURITY is opt-in per device BoardConfig
+ endif
+ 
+ ifeq ($(AB_OTA_UPDATER),true)
 diff --git a/aeraui/core/engine.cpp b/aeraui/core/engine.cpp
 index e478f27..d7a33bf 100644
 --- a/aeraui/core/engine.cpp
@@ -834,6 +847,16 @@ index 7c61dc6..9cdf053 100644
                             : card_height);
      lv_obj_set_style_transform_scale(card, 256, LV_STATE_PRESSED);
      lv_obj_set_style_border_width(card, reboot ? 2 : 1, 0);
+diff --git a/etc/init/keystore2.rc b/etc/init/keystore2.rc
+index fa62662..0eb60ce 100644
+--- a/etc/init/keystore2.rc
++++ b/etc/init/keystore2.rc
+@@ -13,5 +13,4 @@ service keystore2 /system/bin/keystore2 /tmp/misc/keystore
+     class early_hal
+     user root
+     group keystore readproc log
+-    writepid /dev/cpuset/foreground/tasks
+     seclabel u:r:recovery:s0
 diff --git a/minuitwrp/graphics.cpp b/minuitwrp/graphics.cpp
 index 0669f36..b09af60 100644
 --- a/minuitwrp/graphics.cpp
@@ -893,3 +916,28 @@ index 2db6536..7b671c6 100644
      return 0;
  }
  
+diff --git a/partition.cpp b/partition.cpp
+index 8f4feef..7a7e3d9 100644
+--- a/partition.cpp
++++ b/partition.cpp
+@@ -839,9 +839,18 @@ if (TWFunc::Path_Exists("/data/unencrypted/key/version")) {
+ 	ExcludeAll(Mount_Point + "/cache");
+ 	ExcludeAll(Mount_Point + "/per_boot"); // removed each boot by init
+ 	ExcludeAll(Mount_Point + "/gsi"); // cow devices
+-	int retry_count = 3;
++	for (int wait_step = 0; wait_step < 100; ++wait_step) {
++		std::string crypto_ready = android::base::GetProperty("crypto.ready", "");
++		std::string listeners_ready = android::base::GetProperty("vendor.sys.listeners.registered", "");
++		if (crypto_ready == "1" && listeners_ready == "true") {
++			break;
++		}
++		usleep(100000);
++	}
++	usleep(300000);
++	int retry_count = 20;
+ 	while (!android::keystore::Decrypt_DE() && --retry_count)
+-		usleep(2000);
++		usleep(250000);
+ 	if (retry_count > 0) {
+ 		PartitionManager.Set_Crypto_State();
+ 		Is_Encrypted = true;

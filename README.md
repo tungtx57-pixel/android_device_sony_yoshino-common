@@ -10,17 +10,20 @@ Common platform configuration (`msm8998` / Snapdragon 835) for Sony Xperia Yoshi
 
 ## Architecture & AERA Recovery 16.0 (`aera-16.0`) Adaptations
 
-1. **Android 16 (`bp2a`) Build System Compatibility ([`BoardConfigPlatform.mk`](BoardConfigPlatform.mk), [`platform.mk`](platform.mk))**:
+1. **Android 16 (`bp2a`) Build System Compatibility ([`BoardConfigPlatform.mk`](BoardConfigPlatform.mk), [`platform.mk`](platform.mk), [`recovery/Android.mk`](recovery/Android.mk))**:
    - Removed deprecated `PRODUCT_FULL_TREBLE_OVERRIDE` (which triggers a fatal `KATI_obsolete_var` abort on Android 16).
-   - Enabled `PRODUCT_CHECK_PREBUILT_MAX_PAGE_SIZE := false` and `BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true` so 4 KiB-aligned MSM8998 vendor blobs remain buildable on Android 16.
+   - Enabled `PRODUCT_CHECK_PREBUILT_MAX_PAGE_SIZE := false`, `PRODUCT_USE_DYNAMIC_PARTITIONS := false`, and `BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true` so 4 KiB-aligned MSM8998 vendor blobs remain buildable on Android 16.
    - Added Android 16 Soong plugin validation exemptions (`soong-libaosprecovery_defaults`, `soong-libguitwrp_defaults`, `soong-libminuitwrp_defaults`, `soong-vold_defaults`).
-   - Replaced obsolete `TW_RECOVERY_ADDITIONAL_RELINK_FILES` with `AERA_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES` / `TW_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES` and included `android.hardware.boot-V1-ndk`, `libboot_control_client`, `android.hardware.keymaster@3.0-impl`, `libkeymaster3device`, `libpuresoftkeymasterdevice`, `libxml2`, `libicuuc`, and `android.hardware.weaver@1.0`.
-   - Added `system/core/libprocessgroup/profiles/task_profiles.json` copy rule required by Android 16 recovery `init`.
+   - Installed `recovery/lib64/libandroidicu.so` (`libandroidicu_yoshino`) into `/system/lib64/libandroidicu.so` so Android 16's `/system/lib64/libxml2.so` (`NEEDED: libandroidicu.so`) -> `libdrmfs.so` -> `qseecomd` dynamically links cleanly at boot.
+   - Enabled `recovery: true` on `system/core/libprocessgroup/profiles/task_profiles.json` and removed stale Android 12.1 `task_profiles.json` / `cgroups.json` from companion device trees.
 
 2. **MSM8998 Hardware Encryption (Keymaster 3.0 + Legacy fscrypt v1 ICE)**:
    - Configured `AERA_INCLUDE_CRYPTO := true`, `AERA_INCLUDE_CRYPTO_FBE := true`, `AERA_USE_FSCRYPT_POLICY := 1`, `AERA_DEFAULT_KEYMASTER_VERSION := 3.0`, and `AERA_FORCE_KEYMASTER_VER := true`.
-   - Exported `TW_USE_FSCRYPT_POLICY` to Soong `twrpVarsPlugin`.
-   - Included [`patches/apply.sh`](patches/apply.sh) (`qcom-twrp-common.patch`, `system-core.patch`, `system-vold.patch`) to restore the `install_keyring` builtin in `init` and legacy session keyring fallback in `vold` for Linux 4.4 kernels lacking fscrypt v2 ioctls.
+   - Exported `TW_USE_FSCRYPT_POLICY` to Soong `twrpVarsPlugin` in both `vendor/recovery/aera_soong_config.mk` and `vendor/twrp/config/BoardConfigSoong.mk`.
+   - Included [`patches/apply.sh`](patches/apply.sh) (`bootable-recovery.patch`, `qcom-twrp-common.patch`, `system-core.patch`, `system-vold.patch`) to:
+     - Restore the `install_keyring` builtin in `init` and legacy session keyring fallback in `vold` for Linux 4.4 kernels lacking fscrypt v2 ioctls.
+     - Mount `/firmware` (`/vendor/firmware_mnt/image`) and `/persist` (`/mnt/vendor/persist/data`) in `init.recovery.*.rc` `on fs` before `qseecomd` and `keymaster-3-0-qti` start.
+     - Wait for `crypto.ready=1` and `vendor.sys.listeners.registered=true` before `Decrypt_FBE_DE()` invokes `Decrypt_DE()`, and guard `KeyStorage.cpp`, `Keystore.cpp`, `Decrypt.cpp`, and `FsCrypt.cpp` against null pointers and empty optionals.
 
 3. **64 MiB Recovery Partition Budget ([`Android.mk`](Android.mk), [`patches/apply.sh`](patches/apply.sh))**:
    - Sony Yoshino devices have a fixed 64 MiB (`67108864` bytes) `recovery` / `boot` partition.
