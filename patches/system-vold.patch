@@ -212,7 +212,7 @@ index d7b1a0f..af1faff 100644
              std::optional<std::vector<uint8_t>>(std::vector<uint8_t>(key.begin(), key.end()));
  
      ks2::CreateOperationResponse cor;
-+    if (!securityLevel) { LOG(ERROR) << "Keystore securityLevel is null in begin"; return KeystoreOperation(ks2::ResponseCode::SYSTEM_ERROR); }
++    if (!securityLevel) { LOG(ERROR) << "Keystore securityLevel is null in begin"; return KeystoreOperation(); }
      auto rc = securityLevel->createOperation(keyDesc, inParams.vector_data(), false, &cor);
      if (logKeystore2ExceptionIfPresent(rc, "createOperation")) {
          if (rc.getExceptionCode() == EX_SERVICE_SPECIFIC)
