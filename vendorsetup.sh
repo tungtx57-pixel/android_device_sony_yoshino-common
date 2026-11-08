@@ -53,11 +53,11 @@ yoshino_setup_aera_env() {
 	export AERA_QUICK_BACKUP_LIST="/boot;/data;"
 	export AERA_ENABLE_BACKUP_ENCRYPTION=1
 
-	# Display & Statusbar Geometry (16:9 Sony Yoshino Panels)
+	# Display & Statusbar Geometry (16:9 Sony Yoshino Panels, 1440x2560 logical)
 	export AERA_SCREEN_H=1920
-	export AERA_STATUS_H=80
-	export AERA_STATUS_INDENT_LEFT=48
-	export AERA_STATUS_INDENT_RIGHT=48
+	export AERA_STATUS_H=124
+	export AERA_STATUS_INDENT_LEFT=54
+	export AERA_STATUS_INDENT_RIGHT=54
 	export AERA_HIDE_NOTCH=0
 	export AERA_CLOCK_POS=1
 	export AERA_ALLOW_DISABLE_NAVBAR=0

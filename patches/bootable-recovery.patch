@@ -1,0 +1,895 @@
+diff --git a/aeraui/core/engine.cpp b/aeraui/core/engine.cpp
+index e478f27..d7a33bf 100644
+--- a/aeraui/core/engine.cpp
++++ b/aeraui/core/engine.cpp
+@@ -3894,6 +3894,124 @@ private:
+     return true;
+   }
+ 
++  bool PresentMinuiDirectSoftware(const uint8_t *pixels) {
++    unsigned char *dst_bytes = nullptr;
++    int dst_w = 0;
++    int dst_h = 0;
++    int dst_row_bytes = 0;
++    __u32 dst_format = 0;
++    if (pixels == nullptr ||
++        gr_get_frame_target(&dst_bytes, &dst_w, &dst_h, &dst_row_bytes,
++                            &dst_format) != 0) {
++      return false;
++    }
++    if (dst_w != physical_width_ || dst_h != physical_height_ ||
++        width_ <= 0 || height_ <= 0) {
++      return false;
++    }
++
++    const bool swizzle_rb = (dst_format == GGL_PIXEL_FORMAT_RGBA_8888 ||
++                             dst_format == GGL_PIXEL_FORMAT_RGBX_8888);
++    const auto *src_all = reinterpret_cast<const uint32_t *>(pixels);
++
++    if (width_ == dst_w && height_ == dst_h) {
++      for (int32_t y = 0; y < dst_h; ++y) {
++        const uint32_t *src_row =
++            src_all + static_cast<size_t>(y) * static_cast<size_t>(width_);
++        auto *dst_row = reinterpret_cast<uint32_t *>(
++            dst_bytes + static_cast<size_t>(y) * dst_row_bytes);
++        if (!swizzle_rb) {
++          memcpy(dst_row, src_row, static_cast<size_t>(dst_w) * sizeof(uint32_t));
++        } else {
++          for (int32_t x = 0; x < dst_w; ++x) {
++            const uint32_t p = src_row[x];
++            dst_row[x] = (p & 0xFF00FF00u) |
++                         ((p & 0x00FF0000u) >> 16) |
++                         ((p & 0x000000FFu) << 16);
++          }
++        }
++      }
++      gr_flip();
++      return true;
++    }
++
++    if (minui_x_index_.size() != static_cast<size_t>(dst_w) ||
++        minui_src_w_ != width_ || minui_dst_w_ != dst_w) {
++      minui_src_w_ = width_;
++      minui_dst_w_ = dst_w;
++      minui_x_index_.resize(static_cast<size_t>(dst_w));
++      minui_x_weight_.resize(static_cast<size_t>(dst_w));
++      for (int32_t x = 0; x < dst_w; ++x) {
++        const int64_t num = (static_cast<int64_t>(x) * 2 + 1) * width_ * 8 -
++                            static_cast<int64_t>(dst_w) * 8;
++        const int64_t fp = std::max<int64_t>(0, num / dst_w);
++        int32_t sx = static_cast<int32_t>(fp >> 4);
++        uint32_t wx = static_cast<uint32_t>(fp & 0xF);
++        if (sx >= width_ - 1) {
++          sx = width_ - 1;
++          wx = 0;
++        }
++        minui_x_index_[static_cast<size_t>(x)] = sx;
++        minui_x_weight_[static_cast<size_t>(x)] = static_cast<uint8_t>(wx);
++      }
++    }
++
++    const int32_t *x_idx = minui_x_index_.data();
++    const uint8_t *x_w = minui_x_weight_.data();
++    for (int32_t y = 0; y < dst_h; ++y) {
++      const int64_t num_y = (static_cast<int64_t>(y) * 2 + 1) * height_ * 8 -
++                            static_cast<int64_t>(dst_h) * 8;
++      const int64_t fp_y = std::max<int64_t>(0, num_y / dst_h);
++      int32_t sy0 = static_cast<int32_t>(fp_y >> 4);
++      uint32_t wy = static_cast<uint32_t>(fp_y & 0xF);
++      int32_t sy1 = sy0 + 1;
++      if (sy0 >= height_ - 1) {
++        sy0 = height_ - 1;
++        sy1 = sy0;
++        wy = 0;
++      }
++      const uint32_t iy = 16u - wy;
++      const uint32_t *row0 =
++          src_all + static_cast<size_t>(sy0) * static_cast<size_t>(width_);
++      const uint32_t *row1 =
++          src_all + static_cast<size_t>(sy1) * static_cast<size_t>(width_);
++      auto *dst_row = reinterpret_cast<uint32_t *>(
++          dst_bytes + static_cast<size_t>(y) * dst_row_bytes);
++
++      for (int32_t x = 0; x < dst_w; ++x) {
++        const int32_t sx0 = x_idx[x];
++        const uint32_t wx = x_w[x];
++        const int32_t sx1 = sx0 + (wx != 0 ? 1 : 0);
++        const uint32_t ix = 16u - wx;
++
++        const uint32_t w00 = ix * iy;
++        const uint32_t w01 = wx * iy;
++        const uint32_t w10 = ix * wy;
++        const uint32_t w11 = wx * wy;
++
++        const uint32_t p00 = row0[sx0];
++        const uint32_t p01 = row0[sx1];
++        const uint32_t p10 = row1[sx0];
++        const uint32_t p11 = row1[sx1];
++
++        const uint32_t rb_sum =
++            (p00 & 0x00FF00FFu) * w00 + (p01 & 0x00FF00FFu) * w01 +
++            (p10 & 0x00FF00FFu) * w10 + (p11 & 0x00FF00FFu) * w11;
++        const uint32_t ga_sum =
++            ((p00 >> 8) & 0x00FF00FFu) * w00 + ((p01 >> 8) & 0x00FF00FFu) * w01 +
++            ((p10 >> 8) & 0x00FF00FFu) * w10 + ((p11 >> 8) & 0x00FF00FFu) * w11;
++
++        uint32_t rb = (rb_sum >> 8) & 0x00FF00FFu;
++        if (swizzle_rb) {
++          rb = (rb << 16) | (rb >> 16);
++        }
++        dst_row[x] = rb | (ga_sum & 0xFF00FF00u);
++      }
++    }
++    gr_flip();
++    return true;
++  }
++
+   static void FlushDisplay(lv_display_t *display, const lv_area_t *area,
+                            uint8_t *pixels) {
+     auto *self = static_cast<Impl *>(lv_display_get_user_data(display));
+@@ -3942,36 +4060,38 @@ private:
+       return;
+     }
+ 
+-    GGLSurface surface{};
+-    surface.version = sizeof(surface);
+-    surface.width = static_cast<GGLuint>(self->width_);
+-    surface.height = static_cast<GGLuint>(self->height_);
+-    surface.stride = self->width_;
+-    surface.data = pixels;
+-    surface.format = GGL_PIXEL_FORMAT_BGRA_8888;
+-
+     if (lv_display_flush_is_last(display)) {
+-      gr_surface output = static_cast<gr_surface>(&surface);
+-      gr_surface scaled = nullptr;
+-      int32_t output_width = self->width_;
+-      int32_t output_height = self->height_;
+-      if (self->transform_.IsScaled()) {
+-        if (res_scale_surface(output, &scaled,
+-                              static_cast<float>(self->physical_width_) /
+-                                  self->width_,
+-                              static_cast<float>(self->physical_height_) /
+-                                  self->height_) == 0) {
+-          output = scaled;
+-          output_width = self->physical_width_;
+-          output_height = self->physical_height_;
+-        } else {
+-          __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+-                              "minui could not scale the adaptive frame");
++      if (!self->PresentMinuiDirectSoftware(pixels)) {
++        GGLSurface surface{};
++        surface.version = sizeof(surface);
++        surface.width = static_cast<GGLuint>(self->width_);
++        surface.height = static_cast<GGLuint>(self->height_);
++        surface.stride = self->width_;
++        surface.data = pixels;
++        surface.format = GGL_PIXEL_FORMAT_BGRA_8888;
++
++        gr_surface output = static_cast<gr_surface>(&surface);
++        gr_surface scaled = nullptr;
++        int32_t output_width = self->width_;
++        int32_t output_height = self->height_;
++        if (self->transform_.IsScaled()) {
++          if (res_scale_surface(output, &scaled,
++                                static_cast<float>(self->physical_width_) /
++                                    self->width_,
++                                static_cast<float>(self->physical_height_) /
++                                    self->height_) == 0) {
++            output = scaled;
++            output_width = self->physical_width_;
++            output_height = self->physical_height_;
++          } else {
++            __android_log_print(ANDROID_LOG_ERROR, kLogTag,
++                                "minui could not scale the adaptive frame");
++          }
+         }
++        gr_blit(output, 0, 0, output_width, output_height, 0, 0);
++        gr_flip();
++        if (scaled != nullptr) res_free_surface(scaled);
+       }
+-      gr_blit(output, 0, 0, output_width, output_height, 0, 0);
+-      gr_flip();
+-      if (scaled != nullptr) res_free_surface(scaled);
+       self->TrackSubmittedFrame();
+       recorder::CapturePresentedFrame();
+     }
+@@ -4100,6 +4220,10 @@ private:
+   gr_surface scanout2_ = nullptr;
+   GRSurface *scanout_surface1_ = nullptr;
+   GRSurface *scanout_surface2_ = nullptr;
++  int32_t minui_src_w_ = 0;
++  int32_t minui_dst_w_ = 0;
++  std::vector<int32_t> minui_x_index_{};
++  std::vector<uint8_t> minui_x_weight_{};
+   GpuRenderer gpu_renderer_{};
+   lv_display_t *display_ = nullptr;
+   lv_indev_t *pointer_device_ = nullptr;
+diff --git a/aeraui/core/runner.cpp b/aeraui/core/runner.cpp
+index 29b39c8..c8fcc44 100644
+--- a/aeraui/core/runner.cpp
++++ b/aeraui/core/runner.cpp
+@@ -22,6 +22,7 @@
+ #include <mutex>
+ #include <string>
+ #include <thread>
++#include <vector>
+ 
+ #include <android/log.h>
+ #include <minuitwrp/minui.h>
+@@ -39,10 +40,6 @@ namespace aeraui {
+ namespace {
+ 
+ constexpr char kLogTag[] = "AERA UI";
+-constexpr char kPrimeMinFrequency[] =
+-    "/sys/devices/system/cpu/cpufreq/policy6/scaling_min_freq";
+-constexpr char kPrimeMaxFrequency[] =
+-    "/sys/devices/system/cpu/cpufreq/policy6/cpuinfo_max_freq";
+ constexpr char kGpuMinPowerLevel[] =
+     "/sys/class/kgsl/kgsl-3d0/min_pwrlevel";
+ constexpr char kGpuPowerLevelCount[] =
+@@ -89,7 +86,11 @@ class InteractionBoost final {
+         if (affinity_valid_) operation_affinity::Remember(original_affinity_);
+         CPU_ZERO(&prime_affinity_);
+         const long cpu_count = sysconf(_SC_NPROCESSORS_ONLN);
+-        if (cpu_count >= 2) {
++        if (cpu_count >= 4) {
++            for (long c = cpu_count / 2; c < cpu_count; ++c)
++                CPU_SET(c, &prime_affinity_);
++            prime_affinity_valid_ = true;
++        } else if (cpu_count >= 2) {
+             CPU_SET(cpu_count - 1, &prime_affinity_);
+             CPU_SET(cpu_count - 2, &prime_affinity_);
+             prime_affinity_valid_ = true;
+@@ -104,18 +105,12 @@ class InteractionBoost final {
+     void BoostFor(uint64_t duration_ms) {
+         const uint64_t now = MonotonicMilliseconds();
+         deadline_ms_ = std::max(deadline_ms_, now + duration_ms);
+-        // RunLoop starts before KGSL has necessarily published its sysfs
+-        // controls. Retry discovery after renderer initialization instead of
+-        // permanently disabling the GPU boost on that first ENOENT.
+         DiscoverControls();
+         if (!active_ && prime_affinity_valid_)
+             sched_setaffinity(0, sizeof(prime_affinity_), &prime_affinity_);
+-        // A vendor power service can restore the default floor after GPU
+-        // bring-up. Reassert at a low rate while the boot/interaction window
+-        // is active; never write sysfs once per rendered frame.
+         if (!active_ || now >= next_reassert_ms_) {
+-            if (cpu_controls_valid_)
+-                WriteControl(kPrimeMinFrequency, boost_cpu_min_);
++            for (const auto& ctrl : cpu_controls_)
++                WriteControl(ctrl.min_path.c_str(), ctrl.boost_min);
+             if (gpu_controls_valid_)
+                 WriteControl(kGpuMinPowerLevel, boost_gpu_level_);
+             next_reassert_ms_ = now + 500;
+@@ -128,11 +123,26 @@ class InteractionBoost final {
+     }
+ 
+   private:
++    struct CpuPolicyControl {
++        std::string min_path;
++        std::string original_min;
++        std::string boost_min;
++    };
++
+     void DiscoverControls() {
+-        if (!cpu_controls_valid_) {
+-            cpu_controls_valid_ =
+-                ReadControl(kPrimeMinFrequency, &original_cpu_min_) &&
+-                ReadControl(kPrimeMaxFrequency, &boost_cpu_min_);
++        if (cpu_controls_.empty()) {
++            for (int policy : {6, 7, 4, 2, 0}) {
++                const std::string base =
++                    "/sys/devices/system/cpu/cpufreq/policy" +
++                    std::to_string(policy);
++                CpuPolicyControl ctrl;
++                ctrl.min_path = base + "/scaling_min_freq";
++                const std::string max_path = base + "/cpuinfo_max_freq";
++                if (ReadControl(ctrl.min_path.c_str(), &ctrl.original_min) &&
++                    ReadControl(max_path.c_str(), &ctrl.boost_min)) {
++                    cpu_controls_.push_back(std::move(ctrl));
++                }
++            }
+         }
+         if (!gpu_controls_valid_) {
+             std::string levels;
+@@ -141,9 +151,6 @@ class InteractionBoost final {
+                 ReadControl(kGpuPowerLevelCount, &levels);
+             if (gpu_controls_valid_) {
+                 const int count = std::max(1, atoi(levels.c_str()));
+-                /* Dodge maps lower KGSL power-level numbers to faster clocks.
+-                 * The upper-quarter level is 900 MHz on Adreno 830: enough
+-                 * headroom for 120 Hz composition without forcing 1.10 GHz. */
+                 boost_gpu_level_ = std::to_string((count - 1) / 4);
+                 __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                                     "KGSL boost controls ready: level %s of %d",
+@@ -156,8 +163,8 @@ class InteractionBoost final {
+         if (!active_) return;
+         if (gpu_controls_valid_)
+             WriteControl(kGpuMinPowerLevel, original_gpu_level_);
+-        if (cpu_controls_valid_)
+-            WriteControl(kPrimeMinFrequency, original_cpu_min_);
++        for (const auto& ctrl : cpu_controls_)
++            WriteControl(ctrl.min_path.c_str(), ctrl.original_min);
+         if (affinity_valid_)
+             sched_setaffinity(0, sizeof(original_affinity_),
+                               &original_affinity_);
+@@ -167,15 +174,13 @@ class InteractionBoost final {
+ 
+     cpu_set_t original_affinity_{};
+     cpu_set_t prime_affinity_{};
+-    std::string original_cpu_min_;
+-    std::string boost_cpu_min_;
++    std::vector<CpuPolicyControl> cpu_controls_;
+     std::string original_gpu_level_;
+     std::string boost_gpu_level_;
+     uint64_t deadline_ms_ = 0;
+     uint64_t next_reassert_ms_ = 0;
+     bool affinity_valid_ = false;
+     bool prime_affinity_valid_ = false;
+-    bool cpu_controls_valid_ = false;
+     bool gpu_controls_valid_ = false;
+     bool active_ = false;
+ };
+diff --git a/aeraui/scenes/about_scene.cpp b/aeraui/scenes/about_scene.cpp
+index 8dc839f..515ecb6 100644
+--- a/aeraui/scenes/about_scene.cpp
++++ b/aeraui/scenes/about_scene.cpp
+@@ -331,8 +331,11 @@ void BuildAboutScene(lv_obj_t *screen, ActionCallback callback, void *context) {
+   Header(screen, "About AERA", "Independent. Open. Built for recovery.",
+          callback, context);
+   const bool landscape = Landscape(screen);
+-  auto *content = Scroll(screen, landscape ? 330 : 446,
+-                         landscape ? 900 : 2440);
++  const int content_top = landscape ? 330 : 446;
++  const int content_height = std::max(
++      320, static_cast<int>(lv_obj_get_height(screen)) - content_top -
++               NavigationHeight(screen) - 28);
++  auto *content = Scroll(screen, content_top, content_height);
+   lv_obj_set_style_pad_bottom(content, 40, 0);
+ 
+   const std::string version = OrUnknown(RecoveryVersion());
+diff --git a/aeraui/scenes/decrypt_scene.cpp b/aeraui/scenes/decrypt_scene.cpp
+index 3fb1bea..1777b6d 100644
+--- a/aeraui/scenes/decrypt_scene.cpp
++++ b/aeraui/scenes/decrypt_scene.cpp
+@@ -280,9 +280,10 @@ void GridSizeClicked(lv_event_t *event) {
+ }
+ 
+ void MakePatternGridSelector(DecryptState *state, lv_obj_t *panel) {
++  const bool compact = lv_obj_get_height(state->screen) < 2900;
+   auto *selector = lv_obj_create(panel);
+   NoScroll(selector);
+-  lv_obj_set_pos(selector, 86, 394);
++  lv_obj_set_pos(selector, 86, compact ? 64 : 394);
+   lv_obj_set_size(selector, 1012, 88);
+   lv_obj_set_style_radius(selector, 28, 0);
+   lv_obj_set_style_bg_color(selector, kInset, 0);
+@@ -315,9 +316,10 @@ void MakePatternGridSelector(DecryptState *state, lv_obj_t *panel) {
+ }
+ 
+ void MakePattern(DecryptState *state, lv_obj_t *panel) {
++  const bool compact = lv_obj_get_height(state->screen) < 2900;
+   state->pattern_area = lv_obj_create(panel);
+   NoScroll(state->pattern_area);
+-  lv_obj_set_pos(state->pattern_area, 86, 500);
++  lv_obj_set_pos(state->pattern_area, 86, compact ? 172 : 500);
+   lv_obj_set_size(state->pattern_area, 1012, 1012);
+   lv_obj_set_style_radius(state->pattern_area, 34, 0);
+   lv_obj_set_style_bg_color(state->pattern_area, kInset, 0);
+@@ -372,6 +374,7 @@ void PinKeyPressed(lv_event_t *event) {
+ }
+ 
+ void MakePinPad(DecryptState *state, lv_obj_t *panel) {
++  const bool compact = lv_obj_get_height(state->screen) < 2900;
+   state->keyboard = lv_obj_create(panel);
+   Clear(state->keyboard);
+   lv_obj_set_pos(state->keyboard, 86, 720);
+@@ -385,7 +388,7 @@ void MakePinPad(DecryptState *state, lv_obj_t *panel) {
+   static lv_style_transition_dsc_t press_transition;
+   lv_style_transition_dsc_init(&press_transition, press_properties,
+                                lv_anim_path_ease_out, 110, 0, nullptr);
+-  lv_obj_set_pos(state->keyboard, 86, 420);
++  lv_obj_set_pos(state->keyboard, 86, compact ? 256 : 420);
+   for (size_t i = 0; i < labels.size(); ++i) {
+     const bool utility = i == 9 || i == 11;
+     lv_obj_t *key = MakeButton(state->keyboard, labels[i],
+@@ -413,8 +416,9 @@ void MakePinPad(DecryptState *state, lv_obj_t *panel) {
+ }
+ 
+ void MakeKeyboard(DecryptState *state, lv_obj_t *panel, bool pin) {
++  const bool compact = lv_obj_get_height(state->screen) < 2900;
+   state->input = widgets::TextArea(panel);
+-  lv_obj_set_pos(state->input, 86, 470);
++  lv_obj_set_pos(state->input, 86, compact ? 68 : 470);
+   lv_obj_set_size(state->input, 1012, 160);
+   lv_textarea_set_one_line(state->input, true);
+   lv_textarea_set_password_mode(state->input, true);
+@@ -436,7 +440,7 @@ void MakeKeyboard(DecryptState *state, lv_obj_t *panel, bool pin) {
+ 
+   if (pin) {
+     lv_obj_set_style_text_font(state->input, UiFont(&lv_font_montserrat_48), 0);
+-    lv_obj_set_pos(state->input, 86, 90);
++    lv_obj_set_pos(state->input, 86, compact ? 24 : 90);
+     lv_obj_set_style_text_align(state->input, LV_TEXT_ALIGN_CENTER, 0);
+     lv_obj_set_style_text_letter_space(state->input, 12, 0);
+     lv_obj_set_style_bg_opa(state->input, LV_OPA_TRANSP, 0);
+@@ -452,7 +456,7 @@ void MakeKeyboard(DecryptState *state, lv_obj_t *panel, bool pin) {
+   // Keyboard widgets default to BOTTOM_MID. Coordinates below are relative
+   // to the panel's top left, just like the credential field and action buttons.
+   lv_obj_set_align(state->keyboard, LV_ALIGN_TOP_LEFT);
+-  lv_obj_set_pos(state->keyboard, 36, 720);
++  lv_obj_set_pos(state->keyboard, 36, compact ? 260 : 720);
+   lv_obj_set_size(state->keyboard, 1112, pin ? 1010 : 820);
+   lv_keyboard_set_mode(state->keyboard,
+                        pin ? LV_KEYBOARD_MODE_NUMBER
+@@ -563,12 +567,14 @@ DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
+   if(screen_lock)lv_obj_add_flag(state->language_button,LV_OBJ_FLAG_HIDDEN);
+   (void)file_based;
+   const bool pin = credential_type == 3;
++  const int screen_h = lv_obj_get_height(screen);
++  const bool compact = screen_h < 2900;
+ 
+   // A small native lock illustration keeps startup lightweight.
+   lv_obj_t *emblem = lv_obj_create(screen);
+   Clear(emblem);
+   lv_obj_set_size(emblem, 208, 208);
+-  lv_obj_align(emblem, LV_ALIGN_TOP_MID, 0, 310);
++  lv_obj_align(emblem, LV_ALIGN_TOP_MID, 0, compact ? 172 : 310);
+   lv_obj_set_style_pad_all(emblem, 0, 0);
+   lv_obj_remove_flag(emblem, LV_OBJ_FLAG_CLICKABLE);
+   lv_obj_t *shackle = lv_obj_create(emblem);
+@@ -615,7 +621,7 @@ DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
+   state->title = title;
+   lv_obj_set_width(title, 1280);
+   lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+-  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 584);
++  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, compact ? 396 : 584);
+   lv_obj_t *subtitle = Label(
+       screen,
+       state->screen_lock ? "Use your AERA PIN to continue." :
+@@ -623,19 +629,22 @@ DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
+       (credential_type == 2 ? "Draw your phone's unlock pattern." :
+                               "Use your phone's password to continue."),
+       &lv_font_montserrat_32, kMuted);
+-  lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 672);
++  lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, compact ? 468 : 672);
+ 
++  const int panel_y = compact ? 528 : (pin ? 780 : 740);
++  const int panel_h = compact ? std::max(1560, screen_h - panel_y - 60) : 2260;
+   lv_obj_t *panel = lv_obj_create(screen);
+   Clear(panel);
+-  lv_obj_set_pos(panel, 128, pin ? 780 : 740);
+-  lv_obj_set_size(panel, 1184, 2260);
++  lv_obj_set_pos(panel, 128, panel_y);
++  lv_obj_set_size(panel, 1184, panel_h);
+   lv_obj_set_style_pad_all(panel, 0, 0);
+ 
+   state->status = Label(panel,
+                         credential_type == 2 ? "Draw your unlock pattern" :
+                                                "",
+                         &lv_font_montserrat_24, kMuted);
+-  lv_obj_set_pos(state->status, 86, pin ? 286 : 350);
++  lv_obj_set_pos(state->status, 86,
++                 compact ? (pin ? 196 : 16) : (pin ? 286 : 350));
+   lv_obj_set_width(state->status, 1012);
+   lv_obj_set_style_text_align(state->status, LV_TEXT_ALIGN_CENTER, 0);
+ 
+@@ -644,9 +653,14 @@ DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
+   else
+     MakeKeyboard(state, panel, credential_type == 3);
+ 
++  const int submit_y = compact
++      ? (pin ? 1310 : (credential_type == 2 ? 1228 : 1136))
++      : (pin ? 1510 : 1818);
++  const int skip_y = compact ? (submit_y + 162) : (pin ? 1690 : 1990);
++
+   state->submit =
+       MakeButton(panel, state->screen_lock ? "Unlock" : state->secondary ? "Unlock user" : "Unlock storage", kAccent, kCanvas);
+-  lv_obj_set_pos(state->submit, 86, pin ? 1510 : 1818);
++  lv_obj_set_pos(state->submit, 86, submit_y);
+   lv_obj_set_size(state->submit, 1012, 142);
+   lv_obj_set_style_radius(state->submit, 71, 0);
+   state->submit_label = lv_obj_get_child(state->submit, 0);
+@@ -661,7 +675,7 @@ DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
+   lv_obj_t *skip = MakeButton(panel, state->screen_lock ? "Cancel" : "Skip for now", kCanvas,
+                               kMutedStrong);
+   lv_obj_set_style_bg_opa(skip, LV_OPA_TRANSP, 0);
+-  lv_obj_set_pos(skip, 86, pin ? 1690 : 1990);
++  lv_obj_set_pos(skip, 86, skip_y);
+   lv_obj_set_size(skip, 1012, 132);
+   Bind(skip, Action::kDecryptSkip, state);
+ 
+@@ -673,7 +687,7 @@ DecryptScene BuildDecryptScene(lv_obj_t *screen, int credential_type,
+       &lv_font_montserrat_24, kDim);
+   lv_obj_set_width(hint, 1184);
+   lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+-  lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, pin ? -340 : -70);
++  lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, compact ? -44 : (pin ? -340 : -70));
+ 
+   AnimateEnter(emblem, 0, 16);
+   AnimateEnter(title, 30, 20);
+diff --git a/aeraui/scenes/home_scene.cpp b/aeraui/scenes/home_scene.cpp
+index 9ddb3c8..917d5ae 100644
+--- a/aeraui/scenes/home_scene.cpp
++++ b/aeraui/scenes/home_scene.cpp
+@@ -3057,8 +3057,10 @@ static void BuildFilesSurface(lv_obj_t *screen, ActionCallback callback, void *c
+   lv_obj_add_flag(state->search_clear, LV_OBJ_FLAG_HIDDEN);
+   // The file surface reaches the physical bottom. Navigation is a foreground
+   // overlay, while bottom padding keeps the final entry scrollable above it.
+-  state->list = Scroll(screen, landscape ? 500 : 826,
+-                       landscape ? 940 : 2342);
++  const int list_top = landscape ? 500 : 826;
++  const int list_height = std::max(
++      240, static_cast<int>(lv_obj_get_height(screen)) - list_top);
++  state->list = Scroll(screen, list_top, list_height);
+   lv_obj_set_style_pad_bottom(state->list, landscape ? 190 : 242, 0);
+   if (!state->picking) Navigation(screen, Action::kNone, callback, context);
+   Populate(state);
+diff --git a/aeraui/scenes/operation_scene.cpp b/aeraui/scenes/operation_scene.cpp
+index 1953417..80964a2 100644
+--- a/aeraui/scenes/operation_scene.cpp
++++ b/aeraui/scenes/operation_scene.cpp
+@@ -373,8 +373,10 @@ void ShowTechnicalLog(lv_obj_t *screen) {
+   auto *sheet = lv_obj_create(overlay);
+   Panel(sheet, 44, kMainSheet);
+   const bool landscape = Landscape(screen);
+-  lv_obj_set_size(sheet, landscape ? 2200 : 1312,
+-                  landscape ? 1250 : 2550);
++  const int sheet_h = landscape
++      ? 1250
++      : std::min(2550, std::max(900, static_cast<int>(lv_obj_get_height(screen)) - 120));
++  lv_obj_set_size(sheet, landscape ? 2200 : 1312, sheet_h);
+   lv_obj_align(sheet, LV_ALIGN_CENTER, 0, 0);
+   lv_obj_set_style_border_width(sheet, 1, 0);
+   lv_obj_set_style_border_color(sheet, kMainLine, 0);
+@@ -389,7 +391,7 @@ void ShowTechnicalLog(lv_obj_t *screen) {
+   Clear(area);
+   lv_obj_set_pos(area, 48, 190);
+   lv_obj_set_size(area, landscape ? 2104 : 1216,
+-                  landscape ? 820 : 2110);
++                  landscape ? 820 : (sheet_h - 440));
+   lv_obj_add_flag(area, LV_OBJ_FLAG_SCROLLABLE);
+   lv_obj_set_scroll_dir(area, LV_DIR_VER);
+   lv_obj_set_scrollbar_mode(area, LV_SCROLLBAR_MODE_ACTIVE);
+@@ -405,7 +407,7 @@ void ShowTechnicalLog(lv_obj_t *screen) {
+ 
+   auto *close = Button(sheet, "Back to operation",
+                        [overlay] { lv_obj_delete_async(overlay); }, true);
+-  lv_obj_set_pos(close, 48, landscape ? 1060 : 2342);
++  lv_obj_set_pos(close, 48, landscape ? 1060 : (sheet_h - 208));
+   lv_obj_set_size(close, landscape ? 2104 : 1216, 136);
+   AnimateEnter(sheet, 0, 36);
+ }
+@@ -691,9 +693,13 @@ OperationScene BuildJobScene(lv_obj_t *screen, const JobRequest &request,
+   lv_label_set_long_mode(result.destination, LV_LABEL_LONG_DOT);
+ 
+   const int activity_y = landscape ? 340 : 1230;
++  const int max_portrait_activity = std::max(
++      640, static_cast<int>(lv_obj_get_height(screen)) - activity_y - 310);
+   const int activity_height = installer
+-      ? (landscape ? 850 : 1230)
+-      : (landscape ? 850 : result.payload_parallel ? 1120 : 600);
++      ? (landscape ? 850 : std::min(1230, max_portrait_activity))
++      : (landscape ? 850
++                   : std::min(result.payload_parallel ? 1120 : 600,
++                              max_portrait_activity));
+   auto *activity_card = lv_obj_create(screen);
+   result.activity_panel = activity_card;
+   Panel(activity_card, 40, kMainSheet);
+@@ -734,9 +740,10 @@ OperationScene BuildJobScene(lv_obj_t *screen, const JobRequest &request,
+     lv_label_set_long_mode(result.activity_summary, LV_LABEL_LONG_WRAP);
+     lv_obj_set_style_text_line_space(result.activity_summary, line_space, 0);
+ 
+-    const int row_height = landscape ? 118 : 184;
+-    const int row_gap = landscape ? 12 : 18;
+-    const int row_top = landscape ? 90 : 106;
++    const bool compact_rows = !landscape && activity_height < 1180;
++    const int row_height = landscape ? 118 : (compact_rows ? 156 : 184);
++    const int row_gap = landscape ? 12 : (compact_rows ? 14 : 18);
++    const int row_top = landscape ? 90 : 102;
+     const int row_width = landscape ? 1448 : 1216;
+     for (int i = 0; i < 4; ++i) {
+       result.steps[i] = lv_obj_create(activity_card);
+diff --git a/aeraui/scenes/reboot_scene.cpp b/aeraui/scenes/reboot_scene.cpp
+index c86d284..29c75d1 100644
+--- a/aeraui/scenes/reboot_scene.cpp
++++ b/aeraui/scenes/reboot_scene.cpp
+@@ -2,6 +2,7 @@
+  * SPDX-License-Identifier: Apache-2.0 */
+ #include "ui_components.hpp"
+ #include "power_transition.hpp"
++#include <algorithm>
+ #include <cctype>
+ #include <memory>
+ 
+@@ -164,8 +165,11 @@ void BuildRebootScene(lv_obj_t *screen, ActionCallback callback, void *context)
+     {LV_SYMBOL_SETTINGS, "Bootloader", "Restart in hardware fastboot mode", Action::kRebootBootloader},
+     {LV_SYMBOL_USB, "Fastbootd", "Userspace fastboot for logical partitions", Action::kRebootFastbootd},
+     {LV_SYMBOL_POWER, "Power off", "Turn off the device", Action::kPowerOff}}};
+-  auto *list = Scroll(screen, landscape ? 392 : 948,
+-                      landscape ? 820 : 1730);
++  const int list_top = landscape ? 392 : 948;
++  const int list_height = std::max(
++      300, static_cast<int>(lv_obj_get_height(screen)) - list_top -
++               NavigationHeight(screen) - (landscape ? 20 : 28));
++  auto *list = Scroll(screen, list_top, list_height);
+   if (landscape) {
+     lv_obj_set_x(list, 1436);
+     lv_obj_set_width(list, 1668);
+diff --git a/aeraui/scenes/terminal_scene.cpp b/aeraui/scenes/terminal_scene.cpp
+index 16024e2..edbeb62 100644
+--- a/aeraui/scenes/terminal_scene.cpp
++++ b/aeraui/scenes/terminal_scene.cpp
+@@ -4,6 +4,7 @@
+  */
+ #include "scene.hpp"
+ 
++#include <algorithm>
+ #include <string>
+ #include <vector>
+ 
+@@ -71,6 +72,9 @@ void RefreshOutput(TerminalUi *state, bool force = false) {
+ void SetKeyboardVisible(TerminalUi *state, bool visible) {
+   if (state == nullptr || state->keyboard_visible == visible) return;
+   state->keyboard_visible = visible;
++  const int screen_h = lv_obj_get_height(state->screen);
++  const int portrait_kb_h = std::min(1098, screen_h * 38 / 100);
++  const int portrait_kb_y = screen_h - portrait_kb_h;
+   if (visible) {
+     if (state->landscape) {
+       lv_obj_set_pos(state->controls, 1400, 350);
+@@ -83,9 +87,10 @@ void SetKeyboardVisible(TerminalUi *state, bool visible) {
+       lv_obj_set_pos(state->viewport, 64, 350);
+       lv_obj_set_size(state->viewport, 1292, 900);
+     } else {
+-      lv_obj_set_pos(state->controls, 64, 1910);
++      const int controls_y = portrait_kb_y - 112 - 24;
++      lv_obj_set_pos(state->controls, 64, controls_y);
+       lv_obj_set_size(state->controls, 1312, 112);
+-      lv_obj_set_height(state->viewport, 1450);
++      lv_obj_set_height(state->viewport, std::max(320, controls_y - 430 - 24));
+     }
+     lv_obj_remove_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN);
+     lv_obj_move_foreground(state->keyboard);
+@@ -103,9 +108,11 @@ void SetKeyboardVisible(TerminalUi *state, bool visible) {
+         lv_obj_set_size(button, 272, 112);
+       }
+     } else {
+-      lv_obj_set_pos(state->controls, 64, 2720);
++      const int controls_y =
++          screen_h - NavigationHeight(state->screen) - 112 - 24;
++      lv_obj_set_pos(state->controls, 64, controls_y);
+       lv_obj_set_size(state->controls, 1312, 112);
+-      lv_obj_set_height(state->viewport, 2260);
++      lv_obj_set_height(state->viewport, std::max(320, controls_y - 430 - 24));
+     }
+     lv_obj_clear_state(state->command, LV_STATE_FOCUSED);
+   }
+@@ -164,11 +171,18 @@ void BuildTerminalScene(lv_obj_t *screen, ActionCallback callback,
+   lv_obj_align(live, LV_ALIGN_TOP_RIGHT, -80,
+                state->landscape ? 286 : 342);
+ 
++  const int screen_h = lv_obj_get_height(screen);
++  const int portrait_controls_y =
++      screen_h - NavigationHeight(screen) - 112 - 24;
++  const int portrait_viewport_h =
++      std::max(320, portrait_controls_y - 430 - 24);
++  const int portrait_kb_h = std::min(1098, screen_h * 38 / 100);
++
+   state->viewport = lv_obj_create(screen);
+   Panel(state->viewport, 34, Color(0x101216));
+   lv_obj_set_pos(state->viewport, 64, state->landscape ? 350 : 430);
+   lv_obj_set_size(state->viewport, state->landscape ? 2112 : 1312,
+-                  state->landscape ? 900 : 2260);
++                  state->landscape ? 900 : portrait_viewport_h);
+   lv_obj_set_style_border_width(state->viewport, 1, 0);
+   lv_obj_set_style_border_color(state->viewport, kMainLine, 0);
+   lv_obj_set_style_border_opa(state->viewport, LV_OPA_60, 0);
+@@ -187,7 +201,7 @@ void BuildTerminalScene(lv_obj_t *screen, ActionCallback callback,
+   state->controls = lv_obj_create(screen);
+   Clear(state->controls);
+   lv_obj_set_pos(state->controls, state->landscape ? 2240 : 64,
+-                 state->landscape ? 350 : 2720);
++                 state->landscape ? 350 : portrait_controls_y);
+   lv_obj_set_size(state->controls, state->landscape ? 864 : 1312,
+                   state->landscape ? 284 : 112);
+   Control(state, 0, 196, "Esc", TerminalKey::kEscape);
+@@ -239,9 +253,9 @@ void BuildTerminalScene(lv_obj_t *screen, ActionCallback callback,
+   phone_keyboard::Apply(state->keyboard);
+   lv_obj_set_align(state->keyboard, LV_ALIGN_TOP_LEFT);
+   lv_obj_set_pos(state->keyboard, state->landscape ? 1400 : 0,
+-                 state->landscape ? 500 : 2070);
++                 state->landscape ? 500 : (screen_h - portrait_kb_h));
+   lv_obj_set_size(state->keyboard, state->landscape ? 1768 : 1440,
+-                  state->landscape ? 768 : 1098);
++                  state->landscape ? 768 : portrait_kb_h);
+   lv_keyboard_set_textarea(state->keyboard, state->command);
+   lv_obj_add_flag(state->keyboard, LV_OBJ_FLAG_HIDDEN);
+ 
+diff --git a/aeraui/scenes/tool_scene.cpp b/aeraui/scenes/tool_scene.cpp
+index 7c61dc6..9cdf053 100644
+--- a/aeraui/scenes/tool_scene.cpp
++++ b/aeraui/scenes/tool_scene.cpp
+@@ -934,28 +934,29 @@ void BuildFormatData(Tools *state, bool fastboot_mode = false) {
+          fastboot_mode ? nullptr : state->context);
+   if (!fastboot_mode) WipeTabs(state);
+   const bool landscape = Landscape(state->screen);
+-  const int mode_offset = fastboot_mode ? 0 : (landscape ? 80 : 56);
++  const bool compact = !landscape && lv_obj_get_height(state->screen) < 2900;
++  const int mode_offset = fastboot_mode ? 0 : (landscape ? 80 : (compact ? 24 : 56));
+   auto *title = Label(state->screen, "Erase all internal data", &lv_font_montserrat_48, kRed);
+-  lv_obj_set_pos(title, 80, (landscape ? 480 : 654) + mode_offset);
++  lv_obj_set_pos(title, 80, (landscape ? 480 : (compact ? 612 : 654)) + mode_offset);
+   auto *warning = Label(state->screen,
+       "Formatting /data deletes apps, files, photos, videos\n"
+       "and backups stored in internal storage.\n\n"
+       "This cannot be undone.", &lv_font_montserrat_32, kText);
+-  lv_obj_set_pos(warning, 80, (landscape ? 560 : 744) + mode_offset);
++  lv_obj_set_pos(warning, 80, (landscape ? 560 : (compact ? 684 : 744)) + mode_offset);
+   lv_obj_set_width(warning, landscape ? 980 : 1270);
+-  lv_obj_set_style_text_line_space(warning, 12, 0);
++  lv_obj_set_style_text_line_space(warning, compact ? 6 : 12, 0);
+   auto *encryption = Label(state->screen,
+       "Resets storage encryption; Android may encrypt it again.\n"
+       "Adopted storage, if present, may also be erased.", &lv_font_montserrat_24, kMutedStrong);
+-  lv_obj_set_pos(encryption, 80, (landscape ? 770 : 1040) + mode_offset);
++  lv_obj_set_pos(encryption, 80, (landscape ? 770 : (compact ? 912 : 1040)) + mode_offset);
+   lv_obj_set_width(encryption, landscape ? 980 : 1270);
+-  lv_obj_set_style_text_line_space(encryption, 12, 0);
++  lv_obj_set_style_text_line_space(encryption, compact ? 6 : 12, 0);
+   auto *prompt = Label(state->screen, "Type yes to enable Format Data", &lv_font_montserrat_32, kText);
+-  lv_obj_set_pos(prompt, 80, (landscape ? 900 : 1228) + mode_offset);
++  lv_obj_set_pos(prompt, 80, (landscape ? 900 : (compact ? 1020 : 1228)) + mode_offset);
+   state->format_input = TextArea(state->screen);
+   lv_obj_set_pos(state->format_input, 80,
+-                 (landscape ? 960 : 1310) + mode_offset);
+-  lv_obj_set_size(state->format_input, landscape ? 940 : 1280, 150);
++                 (landscape ? 960 : (compact ? 1080 : 1310)) + mode_offset);
++  lv_obj_set_size(state->format_input, landscape ? 940 : 1280, compact ? 132 : 150);
+   lv_textarea_set_one_line(state->format_input, true);
+   // Don't truncate to three letters: "yesplease" must not become "yes".
+   lv_textarea_set_max_length(state->format_input, 32);
+@@ -970,14 +971,15 @@ void BuildFormatData(Tools *state, bool fastboot_mode = false) {
+   lv_obj_set_style_border_color(state->format_input, kAccent, LV_STATE_FOCUSED);
+   lv_obj_set_style_border_width(state->format_input, 2, 0);
+   lv_obj_set_style_radius(state->format_input, 24, 0);
+-  lv_obj_set_style_pad_all(state->format_input, 32, 0);
++  lv_obj_set_style_pad_all(state->format_input, compact ? 24 : 32, 0);
+ 
+   auto *keyboard = lv_keyboard_create(state->screen);
+   phone_keyboard::Apply(keyboard);
+   lv_obj_set_align(keyboard, LV_ALIGN_TOP_LEFT);
+-  lv_obj_set_pos(keyboard, landscape ? 1100 : 48, landscape ? 330 : 1540);
++  lv_obj_set_pos(keyboard, landscape ? 1100 : 48,
++                 landscape ? 330 : (compact ? 1236 + mode_offset : 1540));
+   lv_obj_set_size(keyboard, landscape ? 2004 : 1344,
+-                  landscape ? 850 : 780);
++                  landscape ? 850 : (compact ? 720 : 780));
+   lv_keyboard_set_mode(keyboard, LV_KEYBOARD_MODE_TEXT_LOWER);
+   lv_keyboard_set_textarea(keyboard, state->format_input);
+ 
+@@ -989,9 +991,15 @@ void BuildFormatData(Tools *state, bool fastboot_mode = false) {
+     lv_textarea_set_text(state->format_input, "");
+     Run(state, request);
+   });
++  const int compact_btn_y = std::min(
++      2000 + mode_offset,
++      static_cast<int>(lv_obj_get_height(state->screen)) -
++          (fastboot_mode ? 160 : NavigationHeight(state->screen) + 156));
+   lv_obj_set_pos(state->format_submit, 80,
+-                 (landscape ? 1140 : 2600) + (landscape ? mode_offset : 0));
+-  lv_obj_set_size(state->format_submit, landscape ? 450 : 1280, 132);
++                 landscape ? (1140 + mode_offset)
++                           : (compact ? compact_btn_y : 2600));
++  lv_obj_set_size(state->format_submit,
++                  landscape ? 450 : (compact ? 620 : 1280), 132);
+   lv_obj_set_style_bg_color(state->format_submit, kRed, 0);
+   lv_obj_set_style_bg_color(state->format_submit, kRedSoft, LV_STATE_PRESSED);
+   lv_obj_set_style_bg_color(state->format_submit, kMainPanel, LV_STATE_DISABLED);
+@@ -1003,9 +1011,11 @@ void BuildFormatData(Tools *state, bool fastboot_mode = false) {
+   auto *cancel = Button(state->screen, "Cancel", [state, fastboot_mode] {
+     Open(state, fastboot_mode ? Action::kBack : Action::kWipe);
+   });
+-  lv_obj_set_pos(cancel, landscape ? 570 : 80,
+-                 (landscape ? 1140 : 2770) + (landscape ? mode_offset : 0));
+-  lv_obj_set_size(cancel, landscape ? 450 : 1280, landscape ? 132 : 112);
++  lv_obj_set_pos(cancel, landscape ? 570 : (compact ? 740 : 80),
++                 landscape ? (1140 + mode_offset)
++                           : (compact ? compact_btn_y : 2770));
++  lv_obj_set_size(cancel, landscape ? 450 : (compact ? 620 : 1280),
++                  (landscape || compact) ? 132 : 112);
+ }
+ 
+ lv_obj_t *WorkflowModeCard(lv_obj_t *parent, int x, int y, int width,
+@@ -3685,8 +3695,15 @@ void BuildMenu(Tools *state) {
+   // Utility cards scroll. About and Reboot are full-width destinations pinned
+   // above Navigation, with About immediately above the final Reboot action.
+   const bool landscape = Landscape(state->screen);
+-  state->list = Scroll(state->screen, landscape ? 340 : 452,
+-                       landscape ? 438 : 1900);
++  const int screen_h = lv_obj_get_height(state->screen);
++  const int nav_h = NavigationHeight(state->screen);
++  const int reboot_h = landscape ? 190 : 232;
++  const int about_h = landscape ? 190 : 218;
++  const int reboot_y = screen_h - nav_h - (landscape ? 20 : 28) - reboot_h;
++  const int about_y = reboot_y - (landscape ? 22 : 28) - about_h;
++  const int list_top = landscape ? 340 : 452;
++  const int list_h = std::max(240, about_y - list_top - (landscape ? 20 : 32));
++  state->list = Scroll(state->screen, list_top, list_h);
+   struct Item { const char *icon, *title, *detail; Action action; };
+   const std::array<Item, 12> items{{
+     {LV_SYMBOL_DRIVE, "Mounts", "Mount or unmount recovery volumes", Action::kMounts},
+@@ -3719,12 +3736,11 @@ void BuildMenu(Tools *state) {
+     const int card_width = landscape ? 992 : 640;
+     const int card_step = landscape ? 284 : 306;
+     const int card_height = landscape ? 260 : 280;
+-    const int pinned_y = about ? (landscape ? 798 : 2398)
+-                               : (landscape ? 1010 : 2648);
++    const int pinned_y = about ? about_y : reboot_y;
+     lv_obj_set_pos(card, pinned ? 64 : column * (landscape ? 1016 : 672),
+                    pinned ? pinned_y : row * card_step);
+     lv_obj_set_size(card, pinned ? (landscape ? 3040 : 1312) : card_width,
+-                    pinned ? (landscape ? 190 : about ? 218 : 232)
++                    pinned ? (about ? about_h : reboot_h)
+                            : card_height);
+     lv_obj_set_style_transform_scale(card, 256, LV_STATE_PRESSED);
+     lv_obj_set_style_border_width(card, reboot ? 2 : 1, 0);
+diff --git a/minuitwrp/graphics.cpp b/minuitwrp/graphics.cpp
+index 0669f36..b09af60 100644
+--- a/minuitwrp/graphics.cpp
++++ b/minuitwrp/graphics.cpp
+@@ -720,6 +720,27 @@ void gr_fb_blank(bool blank)
+     gr_backend->blank(gr_backend, blank);
+ }
+ 
++int gr_get_frame_target(unsigned char** data, int* width, int* height,
++                        int* row_bytes, __u32* format)
++{
++    if (!data || !width || !height || !row_bytes || !format)
++        return -1;
++    if (!gr_draw || !gr_draw->data || gr_rotation != 0 ||
++        overscan_offset_x != 0 || overscan_offset_y != 0 ||
++        gr_draw->pixel_bytes != 4)
++        return -1;
++    if (gr_draw->format != GGL_PIXEL_FORMAT_RGBA_8888 &&
++        gr_draw->format != GGL_PIXEL_FORMAT_RGBX_8888 &&
++        gr_draw->format != GGL_PIXEL_FORMAT_BGRA_8888)
++        return -1;
++    *data = gr_draw->data;
++    *width = gr_draw->width;
++    *height = gr_draw->height;
++    *row_bytes = gr_draw->row_bytes;
++    *format = gr_draw->format;
++    return 0;
++}
++
+ int gr_get_surface(gr_surface* surface)
+ {
+     GGLSurface* ms = (GGLSurface*)malloc(sizeof(GGLSurface));
+diff --git a/minuitwrp/include/minuitwrp/minui.h b/minuitwrp/include/minuitwrp/minui.h
+index 269f2bd..736c13a 100644
+--- a/minuitwrp/include/minuitwrp/minui.h
++++ b/minuitwrp/include/minuitwrp/minui.h
+@@ -51,6 +51,8 @@ void gr_exit(void);
+ int gr_fb_width(void);
+ int gr_fb_height(void);
+ gr_pixel *gr_fb_data(void);
++int gr_get_frame_target(unsigned char** data, int* width, int* height,
++                        int* row_bytes, __u32* format);
+ void gr_flip(void);
+ // Optical fingerprint frontends mark only frames containing the lit sensor.
+ void gr_set_fingerprint_pressed(bool pressed);
+diff --git a/minuitwrp/resources.cpp b/minuitwrp/resources.cpp
+index 2db6536..7b671c6 100644
+--- a/minuitwrp/resources.cpp
++++ b/minuitwrp/resources.cpp
+@@ -447,9 +447,6 @@ int res_scale_surface(gr_surface source, gr_surface* destination, float scale_w,
+     gl = NULL;
+     // put the scaled surface in our destination
+     *destination = (gr_surface*) sc_mem_surface;
+-    // free memory used in the source
+-    res_free_surface(source);
+-    source = NULL;
+     return 0;
+ }
+ 

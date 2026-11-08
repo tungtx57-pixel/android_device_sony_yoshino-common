@@ -48,6 +48,7 @@ apply_git_patch() {
 	fi
 }
 
+apply_git_patch "bootable/recovery" "bootable-recovery.patch"
 apply_git_patch "device/qcom/twrp-common" "qcom-twrp-common.patch"
 apply_git_patch "system/core" "system-core.patch"
 apply_git_patch "system/vold" "system-vold.patch"

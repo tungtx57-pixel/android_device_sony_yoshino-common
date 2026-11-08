@@ -27,9 +27,10 @@ Common platform configuration (`msm8998` / Snapdragon 835) for Sony Xperia Yoshi
    - [`Android.mk`](Android.mk) strips the optional `rclone` binary before `mkbootfs` packages the recovery CPIO (unless `AERA_KEEP_RCLONE=1` is set).
    - [`patches/apply.sh`](patches/apply.sh) restricts single-language builds (`AERA_EXTRA_LANGUAGES=false`) to the core `Roboto-Regular.ttf` fallback font instead of copying all CJK/Indic font assets into `/twres/fonts/`.
 
-4. **AERA Environment & UI Configuration ([`vendorsetup.sh`](vendorsetup.sh))**:
+4. **AERA Display, Legacy MDSS `fbdev` & 16:9 UI Configuration ([`BoardConfigPlatform.mk`](BoardConfigPlatform.mk), [`vendorsetup.sh`](vendorsetup.sh), [`patches/bootable-recovery.patch`](patches/bootable-recovery.patch))**:
    - Automatically exports public `AERA_*` flags for `maple`, `poplar`, and `lilac` when sourced by `build/envsetup.sh` or `build/soong/soong_ui.bash` (`vendor/recovery/AERA_A16.sh`).
-   - Avoids incompatible flag combinations (`OF_SUPPORT_ALL_BLOCK_OTA_UPDATES` is omitted when `AERA_VANILLA_BUILD=1`).
+   - Fixes a fatal `SIGABRT` on Frame 1 in `res_scale_surface()` (`minuitwrp/resources.cpp`) where a stack-allocated `GGLSurface` was passed to `free()`, and adds a single-pass zero-allocation bilinear `BGRA -> RGBA` software presenter for legacy MDSS `fbdev` (`1440x2560` logical -> `1080x1920` physical at 60 fps) with native `FBIOBLANK` panel unblanking.
+   - Adapts AERA UI scenes (`Menu`, `Decrypt`, `Terminal`, `Format Data`, `Operation`, `Reboot`, `About`, `Files`) and dynamic `cpufreq/policy*` boost for 16:9 MSM8998 panels.
 
 ---
 
@@ -55,10 +56,10 @@ Trigger [`.github/workflows/Aera.yml`](.github/workflows/Aera.yml) via **Actions
 repo init -u https://github.com/AERA-Recovery/android_manifest.git -b aera-16.0 --depth=1 --git-lfs
 repo sync -c -j$(nproc --all) --force-sync --no-clone-bundle --no-tags
 
-git clone -b android-12.1 https://github.com/tungtx57-pixel/android_device_sony_yoshino-common device/sony/yoshino-common
+git clone -b aera-16.0 https://github.com/tungtx57-pixel/android_device_sony_yoshino-common device/sony/yoshino-common
 git clone -b android-12.1 https://github.com/tungtx57-pixel/android_device_sony_maple device/sony/maple
 
-# Apply MSM8998 Linux 4.4 fscrypt v1 and 64 MiB font budget patches
+# Apply MSM8998 Linux 4.4 fscrypt v1, fbdev UI, and 64 MiB font budget adaptations
 bash device/sony/yoshino-common/patches/apply.sh "$(pwd)"
 
 export ALLOW_MISSING_DEPENDENCIES=true
