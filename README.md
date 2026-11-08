@@ -25,14 +25,14 @@ Common platform configuration (`msm8998` / Snapdragon 835) for Sony Xperia Yoshi
      - Mount `/firmware` (`/vendor/firmware_mnt/image`) and `/persist` (`/mnt/vendor/persist/data`) in `init.recovery.*.rc` `on fs` before `qseecomd` and `keymaster-3-0-qti` start.
      - Wait for `crypto.ready=1` and `vendor.sys.listeners.registered=true` before `Decrypt_FBE_DE()` invokes `Decrypt_DE()`, and guard `KeyStorage.cpp`, `Keystore.cpp`, `Decrypt.cpp`, and `FsCrypt.cpp` against null pointers and empty optionals.
 
-3. **64 MiB Recovery Partition Budget ([`Android.mk`](Android.mk), [`patches/apply.sh`](patches/apply.sh))**:
-   - Sony Yoshino devices have a fixed 64 MiB (`67108864` bytes) `recovery` / `boot` partition.
+3. **64 MiB Recovery Slot & 36 MiB Sony XBoot Initrd Ceiling ([`Android.mk`](Android.mk), [`patches/vendor-recovery.patch`](patches/vendor-recovery.patch), [`patches/apply.sh`](patches/apply.sh))**:
+   - Sony Yoshino devices have a fixed 64 MiB (`67108864` bytes) `recovery` / `boot` partition and a 36 MiB (`splash_region@9d400000`) bootloader initrd limit in Sony XBoot.
    - [`Android.mk`](Android.mk) strips the optional `rclone` binary before `mkbootfs` packages the recovery CPIO (unless `AERA_KEEP_RCLONE=1` is set).
-   - [`patches/apply.sh`](patches/apply.sh) restricts single-language builds (`AERA_EXTRA_LANGUAGES=false`) to the core `Roboto-Regular.ttf` fallback font instead of copying all CJK/Indic font assets into `/twres/fonts/`.
+   - [`patches/apply.sh`](patches/apply.sh) and [`patches/vendor-recovery.patch`](patches/vendor-recovery.patch) restrict single-language builds (`AERA_EXTRA_LANGUAGES=false`) to `Roboto-Regular.ttf`, omit redundant `/sbin` prebuilts (`aapt`, `bash`, `gnutar`, `gnused`, `zstd`, `zip`, `nano`), prune `/system/etc/terminfo` to essential terminal definitions, and strip unneeded ELF symbol tables (`--strip-unneeded`) while preserving `/sbin/busybox`, `/sbin/magiskboot`, `/system/bin/htop`, Adreno 540 GPU, and Wi-Fi.
 
-4. **AERA Display, Legacy MDSS `fbdev` & 16:9 UI Configuration ([`BoardConfigPlatform.mk`](BoardConfigPlatform.mk), [`vendorsetup.sh`](vendorsetup.sh), [`patches/bootable-recovery.patch`](patches/bootable-recovery.patch))**:
-   - Automatically exports public `AERA_*` flags for `maple`, `poplar`, and `lilac` when sourced by `build/envsetup.sh` or `build/soong/soong_ui.bash` (`vendor/recovery/AERA_A16.sh`).
-   - Fixes a fatal `SIGABRT` on Frame 1 in `res_scale_surface()` (`minuitwrp/resources.cpp`) where a stack-allocated `GGLSurface` was passed to `free()`, and adds a single-pass zero-allocation bilinear `BGRA -> RGBA` software presenter for legacy MDSS `fbdev` (`1440x2560` logical -> `1080x1920` physical at 60 fps) with native `FBIOBLANK` panel unblanking.
+4. **Adreno 540 Legacy KGSL GPU, MSM8998 Wi-Fi & 16:9 UI Configuration ([`BoardConfigPlatform.mk`](BoardConfigPlatform.mk), [`recovery/root/init.recovery.wifi.rc`](recovery/root/init.recovery.wifi.rc), [`patches/bootable-recovery.patch`](patches/bootable-recovery.patch), [`patches/lvgl.patch`](patches/lvgl.patch))**:
+   - Enables `AERA_UI_LEGACY_KGSL_GPU := true` (`gralloc.msm8998.so` + Adreno 540 `libEGL_adreno.so` / `libGLESv2_adreno.so` zero-copy `EGLImage` / `glBlitFramebuffer` renderer on legacy MDSS `fbdev` with automatic software fallback) and `OF_ENABLE_WLAN := 1` (`wpa_supplicant`, `wpa_cli`, `dhcptool`, `aera-netfs`, `ttyd`, `aera-browser-jail`, and `init.recovery.wifi.rc` / `aera-vendor-setup.sh`).
+   - Fixes a fatal `SIGABRT` on Frame 1 in `res_scale_surface()` (`minuitwrp/resources.cpp`) and guards `gpt_disk_get_disk_info()` (`gpt/gpt.c:253`) against null buffers.
    - Adapts AERA UI scenes (`Menu`, `Decrypt`, `Terminal`, `Format Data`, `Operation`, `Reboot`, `About`, `Files`) and dynamic `cpufreq/policy*` boost for 16:9 MSM8998 panels.
 
 ---

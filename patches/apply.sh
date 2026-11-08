@@ -419,7 +419,39 @@ if os.path.isdir(sony_root):
                 print(f"[yoshino-patches] Removed non-A/B slotselect in {os.path.relpath(flags_path, tree_root)}")
 PYEOF
 
-# 4. Cap soong_build Go heap memory so env -i "$BUILDER" never swap-thrashes or OOMs on 16 GiB CI runners
+# 4. Optimize copyAeraFonts in bootable/recovery/aeraui/build/aeraui_defaults.go for 64 MiB recovery partitions / 36 MiB XBoot initrd ceiling
+AERAUI_GO="${TREE_ROOT}/bootable/recovery/aeraui/build/aeraui_defaults.go"
+if [ -f "${AERAUI_GO}" ]; then
+	python3 - "${AERAUI_GO}" << 'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+old_snippet = 'copyDir(getRecoveryAbsDir(ctx)+"aeraui/localization/fonts/assets/", fontDest)'
+new_snippet = '''fontSource := getRecoveryAbsDir(ctx) + "aeraui/localization/fonts/assets/"
+	if getMakeVars(ctx, "AERA_EXTRA_LANGUAGES") == "true" {
+		copyDir(fontSource, fontDest)
+	} else {
+		for _, name := range []string{"Roboto-Regular.ttf", "Noto-OFL.txt"} {
+			if err := copyFile(filepath.Join(fontSource, name),
+				filepath.Join(fontDest, name)); err != nil {
+				fmt.Printf("Could not copy AERA font %s: %v\\n", name, err)
+				return false
+			}
+		}
+	}'''
+
+if old_snippet in content and "Roboto-Regular.ttf" not in content:
+    content = content.replace(old_snippet, new_snippet, 1)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("[yoshino-patches] Optimized single-language font copy in aeraui_defaults.go")
+PYEOF
+fi
+
+# 5. Cap soong_build Go heap memory so env -i "$BUILDER" never swap-thrashes or OOMs on 16 GiB CI runners
 SOONG_MAIN_GO="${TREE_ROOT}/build/soong/cmd/soong_build/main.go"
 if [ -f "${SOONG_MAIN_GO}" ]; then
 	python3 - "${SOONG_MAIN_GO}" << 'PYEOF'

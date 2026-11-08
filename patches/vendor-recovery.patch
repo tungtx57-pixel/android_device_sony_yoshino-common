@@ -1,3 +1,65 @@
+diff --git a/AERA_A16.sh b/AERA_A16.sh
+index 6a825f0..7aa257b 100755
+--- a/AERA_A16.sh
++++ b/AERA_A16.sh
+@@ -1570,6 +1570,57 @@ if [ "$AERA_VENDOR_CMD" = "Fox_Before_Recovery_Image" ]; then
+      reduce_ramdisk_size;
+   fi
+ 
++  # Sony Yoshino (MSM8998) XBoot 36 MiB initrd budget optimization:
++  # Keep /sbin/busybox, /sbin/magiskboot, /system/bin/htop, GPU, and Wi-Fi intact;
++  # remove redundant prebuilt /sbin tools, unused non-Latin fallback fonts,
++  # redundant terminfo definitions, and unstripped ELF symbol tables.
++  echo -e "${GREEN}-- Optimizing recovery ramdisk for 36 MiB bootloader initrd limit ...${NC}"
++  rm -f "$AERA_RAMDISK/sbin/aapt" \
++        "$AERA_RAMDISK/sbin/bash" \
++        "$AERA_RAMDISK/sbin/gnutar" \
++        "$AERA_RAMDISK/sbin/gnused" \
++        "$AERA_RAMDISK/sbin/zstd" \
++        "$AERA_RAMDISK/sbin/zip" \
++        "$AERA_RAMDISK/sbin/nano" \
++        "$AERA_RAMDISK/system/bin/nano" \
++        "$AERA_RAMDISK/system/lib64/libncurses.so" \
++        "$AERA_RAMDISK/etc/bash.bashrc" \
++        "$AERA_RAMDISK/system/etc/bash.bashrc"
++  rm -rf "$AERA_RAMDISK/AERA/Files/nano" \
++         "$AERA_RAMDISK/system/etc/nano" \
++         "$AERA_RAMDISK/etc/nano"
++  if [ -f "$AERA_RAMDISK/system/bin/toybox" ] && [ ! -L "$AERA_RAMDISK/system/bin/grep" ]; then
++     rm -f "$AERA_RAMDISK/system/bin/grep" "$AERA_RAMDISK/system/bin/egrep" "$AERA_RAMDISK/system/bin/fgrep"
++     ln -sf toybox "$AERA_RAMDISK/system/bin/grep"
++     ln -sf grep "$AERA_RAMDISK/system/bin/egrep"
++     ln -sf grep "$AERA_RAMDISK/system/bin/fgrep"
++  fi
++  if [ "${AERA_EXTRA_LANGUAGES:-false}" != "true" ]; then
++     rm -f "$AERA_RAMDISK/twres/fonts/wqy-microhei.ttf" \
++           "$AERA_RAMDISK/twres/fonts/NotoSansCJKjp-Regular.ttf" \
++           "$AERA_RAMDISK/twres/fonts/NotoSansDevanagariUI-VF.ttf" \
++           "$AERA_RAMDISK/twres/fonts/NotoSansBengaliUI-VF.ttf" \
++           "$AERA_RAMDISK/twres/fonts/NotoNaskhArabicUI-Regular.ttf" \
++           "$AERA_RAMDISK/twres/fonts/NotoSansHebrew-Regular.ttf" \
++           "$AERA_RAMDISK/twres/fonts/NotoSansThaiUI-Regular.ttf"
++  fi
++  if [ -d "$AERA_RAMDISK/system/etc/terminfo" ]; then
++     find "$AERA_RAMDISK/system/etc/terminfo" -type f \
++       ! -name 'dumb' ! -name 'linux' ! -name 'vt100' ! -name 'vt220' \
++       ! -name 'xterm' ! -name 'xterm-color' ! -name 'xterm-256color' \
++       ! -name 'screen' ! -name 'screen-256color' ! -name 'tmux' ! -name 'tmux-256color' \
++       -delete 2>/dev/null || true
++     find "$AERA_RAMDISK/system/etc/terminfo" -type d -empty -delete 2>/dev/null || true
++  fi
++  STRIP_TOOL=$(ls -1 "$AERA_VENDOR_PATH"/../../prebuilts/clang/host/linux-x86/clang-*/bin/llvm-strip 2>/dev/null | tail -n 1)
++  [ -x "$STRIP_TOOL" ] || STRIP_TOOL=$(which llvm-strip 2>/dev/null || which strip 2>/dev/null || true)
++  if [ -n "$STRIP_TOOL" ] && [ -x "$STRIP_TOOL" ]; then
++     find "$AERA_RAMDISK/system/bin" "$AERA_RAMDISK/system/lib64" "$AERA_RAMDISK/vendor/bin" "$AERA_RAMDISK/vendor/lib64" \
++       -type f 2>/dev/null | while read -r elf_f; do
++       "$STRIP_TOOL" --strip-unneeded "$elf_f" 2>/dev/null || true
++     done
++  fi
++
+   # save the build date
+   BUILD_DATE=$(date -u "+%c")
+   BUILD_DATE_UTC=$(date "+%s")
 diff --git a/aera_soong_config.mk b/aera_soong_config.mk
 index d9d2fe3..c1c18bd 100644
 --- a/aera_soong_config.mk
