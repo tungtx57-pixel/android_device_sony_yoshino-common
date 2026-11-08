@@ -11,8 +11,6 @@ PLATFORM_PATH := device/sony/yoshino-common
 ALLOW_MISSING_DEPENDENCIES := true
 BUILD_BROKEN_DUP_RULES := true
 BUILD_BROKEN_ELF_PREBUILT_PRODUCT_COPY_FILES := true
-PRODUCT_CHECK_PREBUILT_MAX_PAGE_SIZE := false
-PRODUCT_USE_DYNAMIC_PARTITIONS := false
 BUILD_BROKEN_PLUGIN_VALIDATION := \
     soong-libaosprecovery_defaults \
     soong-libguitwrp_defaults \
@@ -110,13 +108,12 @@ SOONG_CONFIG_twrpVarsPlugin += TW_USE_FSCRYPT_POLICY
 SOONG_CONFIG_twrpVarsPlugin_TW_USE_FSCRYPT_POLICY := $(TW_USE_FSCRYPT_POLICY)
 
 ### RECOVERY MODULES & RELINK LIBRARIES
-# libandroidicu_yoshino provides /system/lib64/libandroidicu.so required by
-# Android 16's /system/lib64/libxml2.so -> libdrmfs.so -> qseecomd.
+# Note: recovery/lib64/libandroidicu.so is copied into the device recovery ramdisk
+# by patches/apply.sh for Android 16's /system/lib64/libxml2.so -> libdrmfs.so -> qseecomd.
 TARGET_RECOVERY_DEVICE_MODULES += \
     android.hardware.boot-V1-ndk \
     android.hardware.keymaster@3.0-impl \
     android.hardware.weaver@1.0 \
-    libandroidicu_yoshino \
     libboot_control_client \
     libkeymaster3device \
     libpuresoftkeymasterdevice

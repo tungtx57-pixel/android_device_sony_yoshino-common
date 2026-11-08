@@ -1,5 +1,5 @@
 diff --git a/init/Android.bp b/init/Android.bp
-index 3cc123c..be14985 100644
+index 3cc123c4e8209a8a8465d57710ca8d2b3c6c0d39..be14985bb0b908e787752ab71916f56585bfb200 100644
 --- a/init/Android.bp
 +++ b/init/Android.bp
 @@ -195,6 +195,7 @@ libinit_cc_defaults {
@@ -11,7 +11,7 @@ index 3cc123c..be14985 100644
          "liblogwrap",
          "liblp",
 diff --git a/init/builtins.cpp b/init/builtins.cpp
-index 38aed9c..a032de9 100644
+index 38aed9c64c52737c2375e62dca99e6b33029fc42..a032de985e2f090a0b1cd5dd33c34754c4cafd44 100644
 --- a/init/builtins.cpp
 +++ b/init/builtins.cpp
 @@ -1172,6 +1172,13 @@ static Result<void> do_init_user0(const BuiltinArguments& args) {
@@ -37,7 +37,7 @@ index 38aed9c..a032de9 100644
          {"interface_start",         {1,     1,    {false,  do_interface_start}}},
          {"interface_stop",          {1,     1,    {false,  do_interface_stop}}},
 diff --git a/init/fscrypt_init_extensions.cpp b/init/fscrypt_init_extensions.cpp
-index 6a561e5..b165da9 100644
+index 6a561e54cc694cc7048d960969c1b0a976d804e8..b165da9b9a5d298ba6892a1946449baa71389d9d 100644
 --- a/init/fscrypt_init_extensions.cpp
 +++ b/init/fscrypt_init_extensions.cpp
 @@ -34,12 +34,34 @@
@@ -76,7 +76,7 @@ index 6a561e5..b165da9 100644
  static void delete_dir_contents(const std::string& dir) {
      char* const paths[2] = {const_cast<char*>(dir.c_str()), nullptr};
 diff --git a/init/fscrypt_init_extensions.h b/init/fscrypt_init_extensions.h
-index 5e0269a..4c431e1 100644
+index 5e0269a3b096e167d7ecc76c15afdd221a4560f9..4c431e1e955a7c59c8ff42aaa0b4049a7e61deee 100644
 --- a/init/fscrypt_init_extensions.h
 +++ b/init/fscrypt_init_extensions.h
 @@ -25,5 +25,9 @@ enum class FscryptAction {
@@ -89,15 +89,3 @@ index 5e0269a..4c431e1 100644
 +
  bool FscryptSetDirectoryPolicy(const std::string& ref_basename, FscryptAction action,
                                 const std::string& dir);
-diff --git a/libprocessgroup/profiles/Android.bp b/libprocessgroup/profiles/Android.bp
-index baa4546..4a83025 100644
---- a/libprocessgroup/profiles/Android.bp
-+++ b/libprocessgroup/profiles/Android.bp
-@@ -31,6 +31,7 @@ prebuilt_etc {
- 
- prebuilt_etc {
-     name: "task_profiles.json",
-+    recovery: true,
-     src: "task_profiles.json",
- }
- 
