@@ -11,11 +11,75 @@ index e8bce39..5207392 100644
  endif
  
  ifeq ($(AB_OTA_UPDATER),true)
+diff --git a/aeraui/Android.bp b/aeraui/Android.bp
+index f875084..3eb7e54 100644
+--- a/aeraui/Android.bp
++++ b/aeraui/Android.bp
+@@ -197,6 +197,8 @@ cc_library_static {
+     ],
+     header_libs: [
+         "libarect_headers",
++        "libhardware_headers",
++        "libnativebase_headers",
+         "libnativewindow_headers",
+     ],
+     static_libs: [
+diff --git a/aeraui/build/aeraui_defaults.go b/aeraui/build/aeraui_defaults.go
+index d46698a..825e5bb 100644
+--- a/aeraui/build/aeraui_defaults.go
++++ b/aeraui/build/aeraui_defaults.go
+@@ -147,7 +147,12 @@ func aeraUiDefaults(ctx android.BaseContext) []string {
+ 	flags := append(aeraUiLanguageFlags(ctx), aeraRootManagerFlags(ctx)...)
+ 	flags = append(flags, aeraMobileDataFlags(ctx)...)
+ 	flags = append(flags, aeraEfispFlags(ctx)...)
+-	return append(flags, aeraFingerprintFlags(ctx)...)
++	flags = append(flags, aeraFingerprintFlags(ctx)...)
++	legacyKgslGpu := strings.Trim(getMakeVars(ctx, "AERA_UI_LEGACY_KGSL_GPU"), "\"")
++	if legacyKgslGpu == "1" || strings.EqualFold(legacyKgslGpu, "true") {
++		flags = append(flags, "-DAERA_UI_LEGACY_KGSL_GPU=1")
++	}
++	return flags
+ }
+ 
+ func aeraUiDefaultsFactory() android.Module {
 diff --git a/aeraui/core/engine.cpp b/aeraui/core/engine.cpp
-index e478f27..d7a33bf 100644
+index e478f27..2edbbeb 100644
 --- a/aeraui/core/engine.cpp
 +++ b/aeraui/core/engine.cpp
-@@ -3894,6 +3894,124 @@ private:
+@@ -288,9 +288,19 @@ public:
+       std::memset(draw_buffer_, 0, buffer_size_);
+     }
+ 
++    bool allow_legacy_kgsl = false;
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++    allow_legacy_kgsl = !direct_scanout_;
++#endif
+     gpu_accelerated_ =
+-        direct_scanout_ &&
+-        gpu_renderer_.Initialize(physical_width_, physical_height_);
++        (direct_scanout_ || allow_legacy_kgsl) &&
++        gpu_renderer_.Initialize(physical_width_, physical_height_,
++                                 allow_legacy_kgsl);
++    if (gpu_accelerated_ && draw_buffer_ != nullptr) {
++      std::free(draw_buffer_);
++      draw_buffer_ = nullptr;
++      buffer_size_ = 0;
++    }
+     lv_draw_opengles_set_enabled(gpu_accelerated_);
+     lv_init();
+     lv_tick_set_cb(MonotonicMilliseconds);
+@@ -387,7 +397,9 @@ public:
+         "rendering (%.2f MiB); "
+         "%u Hz scheduler",
+         width_, height_, physical_width_, physical_height_,
+-        gpu_accelerated_ ? "zero-copy Adreno/LVGL"
++        gpu_accelerated_ ? (gpu_renderer_.IsLegacyFbdev()
++                                ? "legacy KGSL/LVGL fbdev"
++                                : "zero-copy Adreno/LVGL")
+                          : (direct_scanout_ ? "software DRM scanout"
+                                             : "minui fallback"),
+         static_cast<double>(buffer_size_) / (1024.0 * 1024.0),
+@@ -3894,6 +3906,124 @@ private:
      return true;
    }
  
@@ -140,7 +204,7 @@ index e478f27..d7a33bf 100644
    static void FlushDisplay(lv_display_t *display, const lv_area_t *area,
                             uint8_t *pixels) {
      auto *self = static_cast<Impl *>(lv_display_get_user_data(display));
-@@ -3942,36 +4060,38 @@ private:
+@@ -3942,36 +4072,38 @@ private:
        return;
      }
  
@@ -206,7 +270,7 @@ index e478f27..d7a33bf 100644
        self->TrackSubmittedFrame();
        recorder::CapturePresentedFrame();
      }
-@@ -4100,6 +4220,10 @@ private:
+@@ -4100,6 +4232,10 @@ private:
    gr_surface scanout2_ = nullptr;
    GRSurface *scanout_surface1_ = nullptr;
    GRSurface *scanout_surface2_ = nullptr;
@@ -217,6 +281,1021 @@ index e478f27..d7a33bf 100644
    GpuRenderer gpu_renderer_{};
    lv_display_t *display_ = nullptr;
    lv_indev_t *pointer_device_ = nullptr;
+diff --git a/aeraui/core/gpu_renderer.cpp b/aeraui/core/gpu_renderer.cpp
+index 8481d6c..1ecc89a 100644
+--- a/aeraui/core/gpu_renderer.cpp
++++ b/aeraui/core/gpu_renderer.cpp
+@@ -10,14 +10,31 @@
+ #include <vndk/hardware_buffer.h>
+ #include <dlfcn.h>
+ #include <unistd.h>
++#include <sys/system_properties.h>
++#include <time.h>
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++#include <hardware/gralloc1.h>
++#include <nativebase/nativebase.h>
++#include <poll.h>
++#include <cerrno>
++#include <cstdio>
++#include <new>
++#include <mutex>
++#include <linux/fb.h>
++#include "legacy_mdss_abi.hpp"
++#endif
+ 
++#include <cstdlib>
+ #include <cstring>
+ 
++#include <pixelflinger/pixelflinger.h>
++
+ #include "drivers/opengles/glad/include/glad/egl.h"
+ #include "drivers/opengles/glad/include/glad/gles2.h"
+ #include "drivers/opengles/lv_opengles_driver.h"
+ #include "drivers/opengles/lv_opengles_texture.h"
+ #include "drivers/opengles/lv_opengles_texture_private.h"
++#include "draw/opengles/lv_draw_opengles.h"
+ 
+ namespace aeraui {
+ namespace {
+@@ -26,6 +43,62 @@ constexpr char kLogTag[] = "AeraGpu";
+ constexpr char kEglDriver[] = "/vendor/lib64/egl/libEGL_adreno.so";
+ constexpr char kGlesDriver[] = "/vendor/lib64/egl/libGLESv2_adreno.so";
+ constexpr char kNativeWindowLibrary[] = "/vendor/lib64/libnativewindow.so";
++bool profile_frame_active = false;
++bool profile_frame_presented = false;
++
++uint64_t ProfileNanoseconds() {
++  timespec now{};
++  clock_gettime(CLOCK_MONOTONIC, &now);
++  return static_cast<uint64_t>(now.tv_sec) * 1000000000ULL + now.tv_nsec;
++}
++
++void ProfileLegacyFrame(lv_event_t* event) {
++  static uint64_t start = 0, total = 0, maximum = 0;
++  static unsigned frames = 0, over_budget = 0;
++  if (lv_event_get_code(event) == LV_EVENT_REFR_START) {
++    char value[PROP_VALUE_MAX]{};
++    __system_property_get("debug.aera.gpu_profile", value);
++    profile_frame_active = value[0] == '1';
++    profile_frame_presented = false;
++    if (profile_frame_active) start = ProfileNanoseconds();
++    else { total = maximum = frames = over_budget = 0; }
++  } else if (profile_frame_active && profile_frame_presented) {
++    const uint64_t elapsed = ProfileNanoseconds() - start;
++    total += elapsed;
++    if (elapsed > maximum) maximum = elapsed;
++    if (elapsed > 16666667ULL) ++over_budget;
++    if (++frames == 60) {
++      __android_log_print(ANDROID_LOG_INFO, kLogTag,
++          "legacy full refresh: average %.2f ms, max %.2f ms, over 60Hz budget %u/60",
++          total / 60000000.0, maximum / 1000000.0, over_budget);
++      total = maximum = frames = over_budget = 0;
++    }
++  }
++}
++
++void RecordLegacyTiming(uint64_t read_ns, uint64_t copy_ns, uint64_t wait_ns) {
++  static uint64_t total_read = 0;
++  static uint64_t total_copy = 0;
++  static uint64_t total_wait = 0;
++  static unsigned count = 0;
++  total_read += read_ns;
++  total_copy += copy_ns;
++  total_wait += wait_ns;
++  if (++count == 60) {
++    lv_opengles_cache_stats_t stats{};
++    lv_draw_opengles_profile(true, &stats);
++    __android_log_print(ANDROID_LOG_INFO, kLogTag,
++                        "legacy present (60 frames): GPU wait/readback %.2f ms, submit/flip %.2f ms, previous flip wait %.2f ms",
++                        total_read / 60000000.0, total_copy / 60000000.0,
++                        total_wait / 60000000.0);
++    __android_log_print(ANDROID_LOG_INFO, kLogTag,
++                        "legacy cache: %u tasks, %u misses, %.2f ms raster+upload/frame, %.2f MiB uploads",
++                        stats.tasks, stats.misses, stats.raster_ms / 60.0,
++                        stats.upload_bytes / 1048576.0);
++    count = 0;
++    total_read = total_copy = total_wait = 0;
++  }
++}
+ constexpr uint32_t Fourcc(char a, char b, char c, char d) {
+   return static_cast<uint32_t>(a) | (static_cast<uint32_t>(b) << 8) |
+          (static_cast<uint32_t>(c) << 16) | (static_cast<uint32_t>(d) << 24);
+@@ -96,24 +169,356 @@ void DisplayResolutionChanged(lv_event_t* event) {
+                         height);
+     return;
+   }
+-  const GLuint texture_id = lv_opengles_texture_get_texture_id(display);
+-  glBindTexture(GL_TEXTURE_2D, texture_id);
+-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+-  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++  auto* renderer = static_cast<GpuRenderer*>(lv_event_get_user_data(event));
++  if (renderer != nullptr && !renderer->ConfigureDisplayTexture(display)) {
++    __android_log_print(ANDROID_LOG_ERROR, kLogTag,
++                        "failed to configure resized display backing");
++  }
+   __android_log_print(ANDROID_LOG_INFO, kLogTag,
+                       "reshaped LVGL texture to %dx%d", width, height);
+ }
+ 
+ }  // namespace
+ 
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++// Old Qualcomm EGL exposes native-buffer images without libnativewindow's
++// AHardwareBuffer API. Keep the vendor ABI behind the legacy build option.
++// The owner destroys its GL texture and EGLImage before releasing this buffer.
++struct LegacySharedBuffer {
++  void* library = nullptr;
++  gralloc1_device_t* device = nullptr;
++  buffer_handle_t handle = nullptr;
++  ANativeWindowBuffer native{};
++  GRALLOC1_PFN_LOCK lock = nullptr;
++  GRALLOC1_PFN_UNLOCK unlock = nullptr;
++  GRALLOC1_PFN_RELEASE release = nullptr;
++  bool usable = true;
++  void* mapped = nullptr;
++
++  ~LegacySharedBuffer() {
++    Unmap();
++    if (handle != nullptr && release != nullptr) release(device, handle);
++    if (device != nullptr) device->common.close(&device->common);
++    if (library != nullptr) dlclose(library);
++  }
++
++  bool Allocate(int width, int height) {
++    const char* properties[] = {"ro.hardware.gralloc", "ro.hardware", "ro.board.platform"};
++    for (const char* property : properties) {
++      char hardware[PROP_VALUE_MAX]{};
++      __system_property_get(property, hardware);
++      if (hardware[0] == '\0' || std::strchr(hardware, '/') != nullptr) continue;
++      char path[160];
++      std::snprintf(path, sizeof(path), "/vendor/lib64/hw/gralloc.%s.so", hardware);
++      library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
++      if (library != nullptr) break;
++    }
++    if (library == nullptr) return false;
++    auto* module = static_cast<hw_module_t*>(dlsym(library, HAL_MODULE_INFO_SYM_AS_STR));
++    if (module == nullptr || module->module_api_version != GRALLOC_MODULE_API_VERSION_1_0 ||
++        gralloc1_open(module, &device) != 0 || device == nullptr) return false;
++#define LOAD_GRALLOC(name, type, id) \
++    auto name = reinterpret_cast<type>(device->getFunction(device, id)); \
++    if (name == nullptr) return false
++    LOAD_GRALLOC(create, GRALLOC1_PFN_CREATE_DESCRIPTOR, GRALLOC1_FUNCTION_CREATE_DESCRIPTOR);
++    LOAD_GRALLOC(destroy, GRALLOC1_PFN_DESTROY_DESCRIPTOR, GRALLOC1_FUNCTION_DESTROY_DESCRIPTOR);
++    LOAD_GRALLOC(dimensions, GRALLOC1_PFN_SET_DIMENSIONS, GRALLOC1_FUNCTION_SET_DIMENSIONS);
++    LOAD_GRALLOC(format, GRALLOC1_PFN_SET_FORMAT, GRALLOC1_FUNCTION_SET_FORMAT);
++    LOAD_GRALLOC(consumer, GRALLOC1_PFN_SET_CONSUMER_USAGE, GRALLOC1_FUNCTION_SET_CONSUMER_USAGE);
++    LOAD_GRALLOC(producer, GRALLOC1_PFN_SET_PRODUCER_USAGE, GRALLOC1_FUNCTION_SET_PRODUCER_USAGE);
++    LOAD_GRALLOC(allocate, GRALLOC1_PFN_ALLOCATE, GRALLOC1_FUNCTION_ALLOCATE);
++    LOAD_GRALLOC(stride, GRALLOC1_PFN_GET_STRIDE, GRALLOC1_FUNCTION_GET_STRIDE);
++#undef LOAD_GRALLOC
++    lock = reinterpret_cast<GRALLOC1_PFN_LOCK>(device->getFunction(device, GRALLOC1_FUNCTION_LOCK));
++    unlock = reinterpret_cast<GRALLOC1_PFN_UNLOCK>(device->getFunction(device, GRALLOC1_FUNCTION_UNLOCK));
++    release = reinterpret_cast<GRALLOC1_PFN_RELEASE>(device->getFunction(device, GRALLOC1_FUNCTION_RELEASE));
++    if (lock == nullptr || unlock == nullptr || release == nullptr) return false;
++    gralloc1_buffer_descriptor_t descriptor{};
++    if (create(device, &descriptor) != 0) return false;
++    const bool allocated = dimensions(device, descriptor, width, height) == 0 &&
++        format(device, descriptor, HAL_PIXEL_FORMAT_RGBA_8888) == 0 &&
++        consumer(device, descriptor, GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN) == 0 &&
++        producer(device, descriptor, GRALLOC1_PRODUCER_USAGE_GPU_RENDER_TARGET) == 0 &&
++        allocate(device, 1, &descriptor, &handle) == 0;
++    destroy(device, descriptor);
++    uint32_t row_pixels = 0;
++    if (!allocated || handle == nullptr || stride(device, handle, &row_pixels) != 0 ||
++        row_pixels < static_cast<uint32_t>(width) || row_pixels > INT32_MAX / 4) return false;
++    // EGL borrows this wrapper; its lifetime encloses the image and texture.
++    native.common.incRef = [](android_native_base_t*) {};
++    native.common.decRef = [](android_native_base_t*) {};
++    native.width = width;
++    native.height = height;
++    native.stride = row_pixels;
++    native.format = HAL_PIXEL_FORMAT_RGBA_8888;
++    native.usage_deprecated = 0x200 | 3;  // legacy HW_RENDER | SW_READ_OFTEN
++    native.usage = native.usage_deprecated;
++    native.layerCount = 1;
++    native.reserved[0] = nullptr;
++    std::memset(native.reserved_proc, 0, sizeof(native.reserved_proc));
++    native.handle = handle;
++    return true;
++  }
++
++  void* Map(int width, int height, bool synchronize = true) {
++    if (!usable) return nullptr;
++    if (mapped != nullptr) return mapped;
++    if (synchronize) glFinish();
++    void* pixels = nullptr;
++    const gralloc1_rect_t rectangle{0, 0, width, height};
++    if (lock(device, handle, 0, GRALLOC1_CONSUMER_USAGE_CPU_READ_OFTEN,
++             &rectangle, &pixels, -1) != 0) {
++      usable = false;
++      return nullptr;
++    }
++    if (pixels == nullptr) {
++      // A successful lock still needs balancing even if the HAL gives no address.
++      int fence = -1;
++      unlock(device, handle, &fence);
++      if (fence >= 0) close(fence);
++      usable = false;
++    }
++    mapped = pixels;
++    return mapped;
++  }
++
++  bool Unmap() {
++    if (mapped == nullptr) return usable;
++    int fence = -1;
++    const int result = unlock(device, handle, &fence);
++    // Respect allocator cache/fence synchronization even on old vendor stacks.
++    if (fence >= 0) {
++      pollfd wait{fence, POLLIN, 0};
++      int status;
++      do { status = poll(&wait, 1, -1); } while (status < 0 && errno == EINTR);
++      close(fence);
++      if (status <= 0 || (wait.revents & (POLLERR | POLLNVAL))) usable = false;
++    }
++    mapped = nullptr;
++    usable = usable && result == 0;
++    return usable;
++  }
++
++  bool CopyTo(void* destination, int pitch, int width, int height) {
++    if (destination == nullptr || pitch < width || Map(width, height) == nullptr) return false;
++    for (int y = 0; y < height; ++y)
++      std::memcpy(static_cast<unsigned char*>(destination) + static_cast<size_t>(y) * pitch * 4,
++                  static_cast<unsigned char*>(mapped) + static_cast<size_t>(y) * native.stride * 4,
++                  static_cast<size_t>(width) * 4);
++    return Unmap();
++  }
++};
++
++// MDSS's atomic interface can scan our linear gralloc buffer without a CPU
++// mapping/copy. Release fences protect reuse; screenshots map only on demand.
++// The fb descriptor is duplicated from minui so closing it cannot release a
++// different framebuffer owner's layers. Unsupported devices keep the copy path.
++struct LegacyScanout {
++  std::mutex mutex;
++  LegacySharedBuffer* buffers[2]{};
++  int fd = -1;
++  int fences[2] = {-1, -1};
++  int displayed = -1;
++  uint32_t pipe = 0;
++  int width = 0, height = 0;
++  bool enabled = false;
++  fb_var_screeninfo original{};
++  GRSurface snapshot{};
++
++  static bool WaitFence(int fence, int timeout_ms = 500) {
++    if (fence < 0) return true;
++    pollfd wait{fence, POLLIN, 0};
++    int rc;
++    do { rc = poll(&wait, 1, timeout_ms); } while (rc < 0 && errno == EINTR);
++    return rc > 0 && (wait.revents & POLLIN) && !(wait.revents & (POLLERR | POLLNVAL));
++  }
++
++  mdss::InputLayer Layer(unsigned index) const {
++    mdss::InputLayer layer{};
++    layer.pipe_ndx = pipe;
++    layer.alpha = 255;
++    layer.transp_mask = UINT32_MAX;
++    layer.blend_op = mdss::kOpaque;
++    layer.src_rect.w = layer.dst_rect.w = width;
++    layer.src_rect.h = layer.dst_rect.h = height;
++    layer.buffer.width = buffers[index]->native.stride;
++    layer.buffer.height = height;
++    layer.buffer.format = mdss::kRgba8888;
++    layer.buffer.planes[0].fd = buffers[index]->handle->data[0];
++    layer.buffer.planes[0].stride = buffers[index]->native.stride * 4;
++    layer.buffer.plane_count = 1;
++    layer.buffer.comp_ratio = {1, 1};
++    layer.buffer.fence = -1; // Producer has completed with glFinish.
++    return layer;
++  }
++
++  bool Initialize(LegacySharedBuffer* first, LegacySharedBuffer* second, int w, int h) {
++    if (!first || !second || w <= 0 || h <= 0 ||
++        static_cast<size_t>(w) > SIZE_MAX / 4 / h) return false;
++    buffers[0] = first; buffers[1] = second;
++    for (auto* b : buffers) {
++      if (!b->handle || b->handle->version != sizeof(native_handle_t) ||
++          b->handle->numFds < 1 || b->handle->data[0] < 0) return false;
++    }
++    fd = gr_legacy_gpu_dup_fb();
++    if (fd < 0 || ioctl(fd, FBIOGET_VSCREENINFO, &original) < 0 ||
++        original.xres != static_cast<uint32_t>(w) || original.yres != static_cast<uint32_t>(h)) return false;
++    width = w; height = h;
++    FILE* caps = std::fopen("/sys/class/graphics/fb0/mdp/caps", "re");
++    if (!caps) return false;
++    char line[1024];
++    uint32_t candidates[16]{};
++    unsigned count = 0;
++    while (std::fgets(line, sizeof(line), caps)) {
++      unsigned num, index, rects, handoff;
++      int display_id;
++      char type[16]{};
++      if (std::sscanf(line, "pipe_num:%u pipe_type:%15s pipe_ndx:%u rects:%u pipe_is_handoff:%u display_id:%d",
++                      &num, type, &index, &rects, &handoff, &display_id) == 6 &&
++          display_id == -1 && handoff == 0 && index != 0 &&
++          std::strcmp(type, "dma") == 0 && count < 16)
++        candidates[count++] = index;
++    }
++    std::fclose(caps);
++    for (unsigned i = 0; i < count; ++i) {
++      pipe = candidates[i];
++      auto layer = Layer(0);
++      mdss::Commit commit{};
++      commit.version = mdss::kVersion;
++      commit.v1.flags = mdss::kValidate;
++      commit.v1.release_fence = commit.v1.retire_fence = -1;
++      commit.v1.input_layers = &layer;
++      commit.v1.input_layer_cnt = 1;
++      const int rc = ioctl(fd, mdss::kAtomicCommit, &commit);
++      if (commit.v1.release_fence >= 0) close(commit.v1.release_fence);
++      if (commit.v1.retire_fence >= 0) close(commit.v1.retire_fence);
++      if (rc == 0 && layer.error_code == 0) {
++        enabled = true;
++        __android_log_print(ANDROID_LOG_INFO, kLogTag,
++                            "MDSS direct GPU scanout ready: pipe %u, %dx%d", pipe, width, height);
++        return true;
++      }
++    }
++    return false;
++  }
++
++  void Disable() {
++    if (fd >= 0 && enabled) {
++      // Restore framebuffer scanout and advance the release timeline before
++      // allowing the shared buffers to be reused by the fallback renderer.
++      original.activate = FB_ACTIVATE_NOW | FB_ACTIVATE_FORCE;
++      for (unsigned i = 0; i < 2; ++i)
++        if (ioctl(fd, FBIOPUT_VSCREENINFO, &original) < 0)
++          __android_log_print(ANDROID_LOG_WARN, kLogTag, "MDSS framebuffer restore failed: %s", std::strerror(errno));
++    }
++    enabled = false;
++    displayed = -1;
++    for (int& fence : fences) {
++      if (fence >= 0) {
++        if (!WaitFence(fence))
++          __android_log_print(ANDROID_LOG_WARN, kLogTag, "MDSS release fence did not drain during fallback");
++        close(fence); fence = -1;
++      }
++    }
++  }
++
++  bool Acquire(unsigned index) {
++    if (!enabled) return false;
++    if (!WaitFence(fences[index])) {
++      __android_log_print(ANDROID_LOG_WARN, kLogTag, "MDSS buffer release timed out; restoring fbdev");
++      Disable();
++      return false;
++    }
++    if (fences[index] >= 0) close(fences[index]);
++    fences[index] = -1;
++    return true;
++  }
++
++  bool Present(unsigned index) {
++    if (!enabled) return false;
++    auto layer = Layer(index);
++    mdss::Commit commit{};
++    commit.version = mdss::kVersion;
++    commit.v1.flags = mdss::kWaitForFinish;
++    commit.v1.release_fence = commit.v1.retire_fence = -1;
++    commit.v1.input_layers = &layer;
++    commit.v1.input_layer_cnt = 1;
++    const int rc = ioctl(fd, mdss::kAtomicCommit, &commit);
++    if (commit.v1.retire_fence >= 0) close(commit.v1.retire_fence);
++    fences[index] = commit.v1.release_fence;
++    if (rc < 0 || layer.error_code != 0 || fences[index] < 0) {
++      __android_log_print(ANDROID_LOG_WARN, kLogTag, "MDSS commit failed: rc=%d layer=%d errno=%d; restoring fbdev",
++                          rc, layer.error_code, errno);
++      Disable();
++      return false;
++    }
++    displayed = index;
++    return true;
++  }
++
++  gr_surface Capture() {
++    std::lock_guard<std::mutex> lock(mutex);
++    if (!enabled || displayed < 0) return nullptr;
++    if (!snapshot.data) {
++      snapshot.data = static_cast<unsigned char*>(std::malloc(static_cast<size_t>(width) * height * 4));
++      if (!snapshot.data) return nullptr;
++      snapshot.width = width; snapshot.height = height;
++      snapshot.row_bytes = width * 4; snapshot.pixel_bytes = 4;
++      snapshot.format = GGL_PIXEL_FORMAT_RGBA_8888;
++    }
++    auto* buffer = buffers[displayed];
++    const auto* pixels = static_cast<const unsigned char*>(buffer->Map(width, height, false));
++    if (!pixels) return nullptr;
++    for (int y = 0; y < height; ++y)
++      std::memcpy(snapshot.data + static_cast<size_t>(y) * snapshot.row_bytes,
++                  pixels + static_cast<size_t>(y) * buffer->native.stride * 4, snapshot.row_bytes);
++    if (!buffer->Unmap()) return nullptr;
++    return &snapshot;
++  }
++
++  ~LegacyScanout() {
++    Disable();
++    if (fd >= 0) close(fd);
++    std::free(snapshot.data);
++  }
++};
++#endif
++
+ GpuRenderer::~GpuRenderer() {
+   Shutdown();
+ }
+ 
+-bool GpuRenderer::Initialize(int32_t width, int32_t height) {
++bool GpuRenderer::ConfigureDisplayTexture(lv_display_t* display) {
++  lv_draw_opengles_invalidate_target();
++  lv_draw_opengles_set_opacity_cache(legacy_fbdev_);
++  if (legacy_fbdev_) {
++    const auto rotation = lv_display_get_rotation(display);
++    const bool landscape = rotation == LV_DISPLAY_ROTATION_90 ||
++                           rotation == LV_DISPLAY_ROTATION_270;
++    const int32_t render_width = landscape ? height_ : width_;
++    const int32_t render_height = landscape ? width_ : height_;
++    if (lv_opengles_texture_set_render_size(display, render_width,
++                                            render_height) != LV_RESULT_OK)
++      return false;
++    __android_log_print(ANDROID_LOG_INFO, kLogTag,
++                        "legacy native raster %dx%d; logical layout %dx%d",
++                        render_width, render_height,
++                        lv_display_get_horizontal_resolution(display),
++                        lv_display_get_vertical_resolution(display));
++  }
++  glBindTexture(GL_TEXTURE_2D, lv_opengles_texture_get_texture_id(display));
++  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++  glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++  return true;
++}
++
++bool GpuRenderer::Initialize(int32_t width, int32_t height,
++                             bool legacy_fbdev) {
+   Shutdown();
+   width_ = width;
+   height_ = height;
++  legacy_fbdev_ = legacy_fbdev;
++  lv_draw_opengles_set_opacity_cache(legacy_fbdev_);
+ 
+   egl_library_ = dlopen(kEglDriver, RTLD_NOW | RTLD_GLOBAL);
+   if (egl_library_ == nullptr) {
+@@ -128,20 +533,16 @@ bool GpuRenderer::Initialize(int32_t width, int32_t height) {
+     Shutdown();
+     return false;
+   }
+-  nativewindow_library_ = dlopen(kNativeWindowLibrary, RTLD_NOW | RTLD_GLOBAL);
+-  // Some recovery device trees package the matching native-window runtime in
+-  // /system as well: inspecting Android's vendor partition temporarily hides
+-  // the ramdisk copy. Keep the existing vendor runtime as the first choice.
+-  if (nativewindow_library_ == nullptr) {
+-    nativewindow_library_ = dlopen("/system/lib64/libnativewindow.so",
+-                                 RTLD_NOW | RTLD_GLOBAL);
+-  }
+-  if (nativewindow_library_ == nullptr) {
+-    __android_log_print(ANDROID_LOG_WARN, kLogTag,
+-                        "Android native-buffer runtime unavailable: %s",
+-                        dlerror());
+-    Shutdown();
+-    return false;
++  if (!legacy_fbdev_) {
++    nativewindow_library_ =
++        dlopen(kNativeWindowLibrary, RTLD_NOW | RTLD_GLOBAL);
++    if (nativewindow_library_ == nullptr) {
++      __android_log_print(ANDROID_LOG_WARN, kLogTag,
++                          "Android native-buffer runtime unavailable: %s",
++                          dlerror());
++      Shutdown();
++      return false;
++    }
+   }
+ 
+   PFNEGLGETDISPLAYPROC get_display = nullptr;
+@@ -229,6 +630,132 @@ bool GpuRenderer::Initialize(int32_t width, int32_t height) {
+     return false;
+   }
+ 
++  if (legacy_fbdev_) {
++    const size_t pixel_count = static_cast<size_t>(width_) * height_;
++    if (width_ <= 0 || height_ <= 0 || pixel_count > SIZE_MAX / 4U) {
++      Shutdown();
++      return false;
++    }
++    legacy_readback_size_ = pixel_count * 4U;
++    if (posix_memalign(&legacy_readback_, 64, legacy_readback_size_) != 0) {
++      legacy_readback_ = nullptr;
++      legacy_readback_size_ = 0;
++      __android_log_print(ANDROID_LOG_WARN, kLogTag,
++                          "legacy fbdev readback allocation failed");
++      Shutdown();
++      return false;
++    }
++
++    // GLES2 cannot assume PACK_ROW_LENGTH support. Pad the off-screen target
++    // to the CPU buffer's pitch instead, while keeping the viewport at the
++    // panel width. A single read then lands directly in the drawing buffer.
++    int pitch_pixels = 0;
++    legacy_target_width_ = width_;
++    if (gr_get_rgba_frame_target(width_, height_, &pitch_pixels) != nullptr) {
++      GLint max_texture_size = 0;
++      glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture_size);
++      if (pitch_pixels >= width_ && pitch_pixels <= max_texture_size)
++        legacy_target_width_ = pitch_pixels;
++    }
++    // Build two independent native buffers. If either cannot be imported,
++    // retain the single-target copy/readback path instead of failing boot.
++    for (unsigned int i = 0; i < 2; ++i) {
++    glGenTextures(1, &textures_[i]);
++    glBindTexture(GL_TEXTURE_2D, textures_[i]);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, legacy_target_width_, height_, 0, GL_RGBA,
++                 GL_UNSIGNED_BYTE, nullptr);
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++    char readback_only[PROP_VALUE_MAX]{};
++    __system_property_get("debug.aera.gpu_readback", readback_only);
++    auto image_target = reinterpret_cast<ImageTargetTexture>(
++        LoadSymbol(&gles_loader, "glEGLImageTargetTexture2DOES"));
++    if (readback_only[0] != '1' && image_target != nullptr &&
++        eglCreateImageKHR != nullptr && eglDestroyImageKHR != nullptr &&
++        HasExtension(eglQueryString(display, EGL_EXTENSIONS), "EGL_ANDROID_image_native_buffer")) {
++      auto* shared = new (std::nothrow) LegacySharedBuffer;
++      if (shared != nullptr && shared->Allocate(legacy_target_width_, height_)) {
++        const EGLint attributes[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
++        EGLImageKHR image = eglCreateImageKHR(display, EGL_NO_CONTEXT,
++            kEglNativeBufferAndroid, &shared->native, attributes);
++        if (image != EGL_NO_IMAGE_KHR) {
++          image_target(GL_TEXTURE_2D, image);
++          if (glGetError() == GL_NO_ERROR) {
++            legacy_shared_[i] = shared;
++            egl_images_[i] = image;
++          } else {
++            eglDestroyImageKHR(display, image);
++          }
++        }
++      }
++      if (legacy_shared_[i] == nullptr) {
++        delete shared;
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, legacy_target_width_, height_, 0,
++                     GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++      }
++    }
++#endif
++    glGenFramebuffers(1, &framebuffers_[i]);
++    glBindFramebuffer(GL_FRAMEBUFFER, framebuffers_[i]);
++    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
++                           GL_TEXTURE_2D, textures_[i], 0);
++    const GLenum target_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++    const GLenum target_error = glGetError();
++    bool target_ready = target_status == GL_FRAMEBUFFER_COMPLETE && target_error == GL_NO_ERROR;
++    if (!target_ready) {
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++      if (legacy_shared_[i] != nullptr) {
++        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, legacy_target_width_, height_, 0,
++                    GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
++        eglDestroyImageKHR(display, static_cast<EGLImageKHR>(egl_images_[i]));
++        egl_images_[i] = nullptr;
++        delete legacy_shared_[i];
++        legacy_shared_[i] = nullptr;
++        const GLenum fallback_status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
++        const GLenum fallback_error = glGetError();
++        target_ready = fallback_status == GL_FRAMEBUFFER_COMPLETE && fallback_error == GL_NO_ERROR;
++      }
++#endif
++    }
++    if (!target_ready) {
++      if (i == 1) break;
++      __android_log_print(ANDROID_LOG_WARN, kLogTag,
++                          "legacy KGSL framebuffer is not renderable");
++      Shutdown();
++      return false;
++    }
++    }
++    legacy_double_buffered_ = legacy_shared_[0] != nullptr && legacy_shared_[1] != nullptr;
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++    char direct_scanout[PROP_VALUE_MAX]{};
++    __system_property_get("debug.aera.mdss_scanout", direct_scanout);
++    if (legacy_double_buffered_ && direct_scanout[0] != '0') {
++      legacy_scanout_ = new (std::nothrow) LegacyScanout;
++      if (legacy_scanout_ && legacy_scanout_->Initialize(legacy_shared_[0], legacy_shared_[1], width_, height_)) {
++        gr_set_legacy_gpu_capture([](void* owner) -> gr_surface {
++          return static_cast<LegacyScanout*>(owner)->Capture();
++        }, legacy_scanout_);
++      } else {
++        delete legacy_scanout_; legacy_scanout_ = nullptr;
++        __android_log_print(ANDROID_LOG_INFO, kLogTag, "MDSS direct scanout unavailable; using shared-buffer copy");
++      }
++    }
++#endif
++    glBindFramebuffer(GL_FRAMEBUFFER, 0);
++    ready_ = true;
++    __android_log_print(
++        ANDROID_LOG_INFO, kLogTag,
++        "legacy KGSL GPU ready: EGL %d.%d, %s, %s, %dx%d fbdev %s (pitch %d)",
++        major, minor, reinterpret_cast<const char*>(glGetString(GL_VENDOR)),
++        reinterpret_cast<const char*>(glGetString(GL_RENDERER)), width_,
++        height_, legacy_double_buffered_ ? "shared-buffer pair" :
++            legacy_shared_[0] != nullptr ? "shared-buffer" : "readback", legacy_target_width_);
++    return true;
++  }
++
+   const char* egl_extensions = eglQueryString(display, EGL_EXTENSIONS);
+   const char* gl_extensions =
+       reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS));
+@@ -368,19 +895,24 @@ lv_display_t* GpuRenderer::CreateDisplay(int32_t logical_width,
+       lv_opengles_texture_create(logical_width_, logical_height_);
+   driver_initialized_ = display != nullptr;
+   if (display != nullptr) {
+-    const GLuint texture = lv_opengles_texture_get_texture_id(display);
+-    glBindTexture(GL_TEXTURE_2D, texture);
+     // The logical canvas is normally resampled to the native panel. Linear
+     // filtering keeps text and curves clean instead of exposing pixel steps.
+-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++    if (!ConfigureDisplayTexture(display)) {
++      lv_display_delete(display);
++      driver_initialized_ = false;
++      return nullptr;
++    }
+     // The OpenGL texture driver does not resize itself when LVGL swaps the
+     // logical dimensions for 90/270-degree rotation. A fixed portrait texture
+     // clips and folds a landscape scene, especially mutable video images.
+     // Keep the backing texture equal to the current logical viewport and let
+     // lv_opengles_render_display_texture rotate it once into native scanout.
+     lv_display_add_event_cb(display, DisplayResolutionChanged,
+-                            LV_EVENT_RESOLUTION_CHANGED, nullptr);
++                            LV_EVENT_RESOLUTION_CHANGED, this);
++    if (legacy_fbdev_) {
++      lv_display_add_event_cb(display, ProfileLegacyFrame, LV_EVENT_REFR_START, nullptr);
++      lv_display_add_event_cb(display, ProfileLegacyFrame, LV_EVENT_REFR_READY, nullptr);
++    }
+   }
+   return display;
+ }
+@@ -388,46 +920,156 @@ lv_display_t* GpuRenderer::CreateDisplay(int32_t logical_width,
+ bool GpuRenderer::Present(lv_display_t* display) {
+   if (!ready_ || display == nullptr)
+     return false;
++  if (legacy_fbdev_ && profile_frame_active) profile_frame_presented = true;
++  lv_draw_opengles_invalidate_target();
+ 
+-  // GL errors remain pending until read. A rejected LVGL draw command must
+-  // not suppress an otherwise valid scanout (including every later frame).
+-  // Keep drawing diagnostics separate from the final composition/DRM result.
+-  GLenum draw_error = GL_NO_ERROR;
+-  bool context_lost = false;
+-  for (int pending = 0; pending < 16; ++pending) {
+-    const GLenum error = glGetError();
+-    if (error == GL_NO_ERROR) break;
+-    if (draw_error == GL_NO_ERROR) draw_error = error;
+-    constexpr GLenum kGlContextLost = 0x0507;
+-    context_lost |= error == kGlContextLost;
+-  }
+-  static unsigned int draw_failures = 0;
+-  if (draw_error != GL_NO_ERROR) {
+-    if (++draw_failures == 1 || draw_failures % 120 == 0)
+-      __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+-                          "LVGL drawing error: %#x (frame %u)", draw_error,
+-                          draw_failures);
+-    if (context_lost) return false;
+-  } else draw_failures = 0;
+-
+-  const unsigned int index = next_buffer_;
++  const unsigned int index = legacy_fbdev_ && !legacy_double_buffered_ ? 0U : next_buffer_;
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++  std::unique_lock<std::mutex> scanout_lock;
++  bool direct_scanout = false;
++  uint64_t direct_wait_ns = 0;
++  if (legacy_scanout_) {
++    scanout_lock = std::unique_lock<std::mutex>(legacy_scanout_->mutex);
++    char value[PROP_VALUE_MAX]{};
++    __system_property_get("debug.aera.mdss_scanout", value);
++    if (value[0] == '0') legacy_scanout_->Disable();
++    const uint64_t start = profile_frame_active ? ProfileNanoseconds() : 0;
++    direct_scanout = legacy_scanout_->Acquire(index);
++    if (profile_frame_active) direct_wait_ns = ProfileNanoseconds() - start;
++  }
++  // A CPU-locked buffer cannot be rendered into. Only the other buffer may
++  // still be borrowed by the presentation worker while this frame draws.
++  if (legacy_fbdev_ && legacy_shared_[index] != nullptr && legacy_shared_[index]->mapped != nullptr) {
++    gr_wait_legacy_gpu_present();
++    if (!legacy_shared_[index]->Unmap()) return false;
++  }
++#endif
+   glBindFramebuffer(GL_FRAMEBUFFER, framebuffers_[index]);
+   glViewport(0, 0, width_, height_);
+   glDisable(GL_SCISSOR_TEST);
+   glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+   glClear(GL_COLOR_BUFFER_BIT);
+-  // The native scanout and LVGL texture share the panel's portrait orientation.
+-  // No additional axis mirroring is required for the final composition.
++  // Keep the existing DRM orientation. The legacy path copies glReadPixels'
++  // bottom-first rows into fbdev's top-first surface, so it must not apply
++  // the vertical flip used when presenting to an EGL window surface.
+   lv_opengles_render_display_texture(display, false, false);
+-  glFinish();
+-  const GLenum present_error = glGetError();
+-  if (present_error != GL_NO_ERROR) {
+-    static unsigned int failures = 0;
+-    if (++failures == 1 || failures % 120 == 0)
+-      __android_log_print(ANDROID_LOG_ERROR, kLogTag,
+-                          "scanout composition error: %#x", present_error);
++  // ReadPixels below already synchronizes the legacy render target.
++  // Keep the existing explicit synchronization for DRM scanout.
++  if (!legacy_fbdev_)
++    glFinish();
++  if (glGetError() != GL_NO_ERROR)
+     return false;
++
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++  if (direct_scanout) {
++    lv_draw_opengles_profile(profile_frame_active, nullptr);
++    const uint64_t begin = profile_frame_active ? ProfileNanoseconds() : 0;
++    glFinish();
++    const uint64_t finished = profile_frame_active ? ProfileNanoseconds() : 0;
++    if (legacy_scanout_->Present(index)) {
++      next_buffer_ = 1U - index;
++      if (profile_frame_active)
++        RecordLegacyTiming(finished - begin, ProfileNanoseconds() - finished, direct_wait_ns);
++      return true;
++    }
+   }
++#endif
++
++  if (legacy_fbdev_) {
++    char profiling[PROP_VALUE_MAX]{};
++    __system_property_get("debug.aera.gpu_profile", profiling);
++    const bool profile = profiling[0] == '1';
++    lv_draw_opengles_profile(profile, nullptr);
++    char synchronous[PROP_VALUE_MAX]{};
++    __system_property_get("debug.aera.fb_sync", synchronous);
++    const bool async_present = synchronous[0] != '1';
++    // Submit off-screen GPU work before waiting for the previous scanout.
++    // EGL stays on this thread. The worker only copies/posts the CPU buffer.
++    glFlush();
++    const uint64_t prepare_begin = profile ? ProfileNanoseconds() : 0;
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++    // The other buffer belongs to the worker. Finish/map this one first so
++    // GPU work and cache invalidation overlap the previous page flip.
++    if (legacy_double_buffered_ && async_present && legacy_shared_[index] != nullptr)
++      legacy_shared_[index]->Map(width_, height_);
++#endif
++    const uint64_t prepare_ns = profile ? ProfileNanoseconds() - prepare_begin : 0;
++    const uint64_t wait_begin = profile ? ProfileNanoseconds() : 0;
++    gr_wait_legacy_gpu_present();
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++    for (unsigned int i = 0; i < 2; ++i) {
++      auto* shared = legacy_shared_[i];
++      if (i != index && shared != nullptr && shared->mapped != nullptr && !shared->Unmap()) return false;
++    }
++#endif
++    const uint64_t wait_ns = profile ? ProfileNanoseconds() - wait_begin : 0;
++    const auto present_frame = [async_present]() {
++      if (!async_present || !gr_present_legacy_gpu_async()) gr_flip();
++    };
++    const uint64_t begin = profile ? ProfileNanoseconds() : 0;
++    glPixelStorei(GL_PACK_ALIGNMENT, 4);
++    int pitch_pixels = 0;
++    void* direct_target = gr_get_rgba_frame_target(width_, height_, &pitch_pixels);
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++    if (legacy_shared_[index] != nullptr) {
++      auto* shared = legacy_shared_[index];
++      if (legacy_double_buffered_ && async_present && direct_target != nullptr) {
++        void* pixels = shared->Map(width_, height_);
++        if (pixels != nullptr && gr_present_legacy_gpu_buffer(pixels, width_, height_, shared->native.stride * 4)) {
++          next_buffer_ = 1U - index;
++          if (profile) RecordLegacyTiming(prepare_ns + ProfileNanoseconds() - begin, 0, wait_ns);
++          return true;
++        }
++      }
++      void* target = direct_target != nullptr ? direct_target : legacy_readback_;
++      const int pitch = direct_target != nullptr ? pitch_pixels : width_;
++      if (shared->CopyTo(target, pitch, width_, height_)) {
++        const uint64_t read_done = profile ? ProfileNanoseconds() : 0;
++        if (direct_target != nullptr || gr_copy_rgba_frame(target, width_, height_)) {
++          present_frame();
++          if (profile) RecordLegacyTiming(read_done - begin, ProfileNanoseconds() - read_done, wait_ns);
++          return true;
++        }
++      }
++      // Unsupported CPU mapping retains the renderable image and uses the
++      // existing readback path; never present a partially copied buffer.
++    }
++#endif
++    if (direct_target != nullptr && pitch_pixels == legacy_target_width_) {
++      glReadPixels(0, 0, legacy_target_width_, height_, GL_RGBA,
++                   GL_UNSIGNED_BYTE, direct_target);
++      if (glGetError() == GL_NO_ERROR) {
++        const uint64_t read_done = profile ? ProfileNanoseconds() : 0;
++        present_frame();
++        if (profile) RecordLegacyTiming(read_done - begin, ProfileNanoseconds() - read_done, wait_ns);
++        return true;
++      }
++      // Fall back to the packed readback/blitter if a driver rejects a
++      // direct CPU destination. No partially-read frame is presented.
++    }
++    glReadPixels(0, 0, width_, height_, GL_RGBA, GL_UNSIGNED_BYTE,
++                 legacy_readback_);
++    if (glGetError() != GL_NO_ERROR)
++      return false;
++    const uint64_t read_done = profile ? ProfileNanoseconds() : 0;
++    if (gr_copy_rgba_frame(legacy_readback_, width_, height_)) {
++      present_frame();
++      if (profile) RecordLegacyTiming(read_done - begin, ProfileNanoseconds() - read_done, wait_ns);
++      return true;
++    }
++    GGLSurface surface{};
++    surface.version = sizeof(surface);
++    surface.width = static_cast<GGLuint>(width_);
++    surface.height = static_cast<GGLuint>(height_);
++    surface.stride = width_;
++    surface.data = static_cast<GGLubyte*>(legacy_readback_);
++    surface.format = GGL_PIXEL_FORMAT_RGBA_8888;
++    gr_blit(static_cast<gr_surface>(&surface), 0, 0, width_, height_, 0, 0);
++    present_frame();
++    if (profile) RecordLegacyTiming(read_done - begin, ProfileNanoseconds() - read_done, wait_ns);
++    return true;
++  }
++
+   if (gr_drm_present(scanouts_[index]) != 0)
+     return false;
+ 
+@@ -436,6 +1078,16 @@ bool GpuRenderer::Present(lv_display_t* display) {
+ }
+ 
+ void GpuRenderer::Shutdown() {
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++  if (legacy_scanout_) {
++    gr_set_legacy_gpu_capture(nullptr, nullptr);
++    delete legacy_scanout_; legacy_scanout_ = nullptr;
++  }
++#endif
++  if (legacy_fbdev_) gr_wait_legacy_gpu_present();
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++  for (auto* shared : legacy_shared_) if (shared != nullptr) shared->Unmap();
++#endif
+   ready_ = false;
+   if (egl_display_ != nullptr && egl_context_ != nullptr &&
+       egl_surface_ != nullptr && eglMakeCurrent != nullptr) {
+@@ -483,11 +1135,19 @@ void GpuRenderer::Shutdown() {
+   }
+   if (gles_library_ != nullptr)
+     dlclose(gles_library_);
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++  for (auto* shared : legacy_shared_) delete shared;
++#endif
++  legacy_shared_[0] = legacy_shared_[1] = nullptr;
++  legacy_double_buffered_ = false;
+   if (egl_library_ != nullptr)
+     dlclose(egl_library_);
+   if (nativewindow_library_ != nullptr)
+     dlclose(nativewindow_library_);
+ 
++  if (legacy_readback_ != nullptr)
++    std::free(legacy_readback_);
++
+   egl_library_ = nullptr;
+   gles_library_ = nullptr;
+   nativewindow_library_ = nullptr;
+@@ -504,8 +1164,12 @@ void GpuRenderer::Shutdown() {
+   height_ = 0;
+   logical_width_ = 0;
+   logical_height_ = 0;
++  legacy_readback_ = nullptr;
++  legacy_readback_size_ = 0;
++  legacy_target_width_ = 0;
+   next_buffer_ = 0;
+   driver_initialized_ = false;
++  legacy_fbdev_ = false;
+ }
+ 
+ }  // namespace aeraui
+diff --git a/aeraui/core/gpu_renderer.hpp b/aeraui/core/gpu_renderer.hpp
+index 9a6bc49..4fc6ed9 100644
+--- a/aeraui/core/gpu_renderer.hpp
++++ b/aeraui/core/gpu_renderer.hpp
+@@ -4,6 +4,7 @@
+  */
+ #pragma once
+ 
++#include <cstddef>
+ #include <cstdint>
+ #include <linux/types.h>
+ 
+@@ -13,6 +14,8 @@
+ struct AHardwareBuffer;
+ 
+ namespace aeraui {
++struct LegacySharedBuffer;
++struct LegacyScanout;
+ 
+ // Owns the recovery-local Adreno EGL context and imports minui's two DRM
+ // scanout buffers. Nothing is linked against the vendor driver: every entry
+@@ -25,11 +28,14 @@ class GpuRenderer final {
+   GpuRenderer(const GpuRenderer&) = delete;
+   GpuRenderer& operator=(const GpuRenderer&) = delete;
+ 
+-  bool Initialize(int32_t width, int32_t height);
++  bool Initialize(int32_t width, int32_t height,
++                  bool legacy_fbdev = false);
+   lv_display_t* CreateDisplay(int32_t logical_width, int32_t logical_height);
++  bool ConfigureDisplayTexture(lv_display_t* display);
+   bool Present(lv_display_t* display);
+   void Shutdown();
+   bool IsReady() const { return ready_; }
++  bool IsLegacyFbdev() const { return legacy_fbdev_; }
+ 
+  private:
+   void* egl_library_ = nullptr;
+@@ -47,8 +53,17 @@ class GpuRenderer final {
+   int32_t height_ = 0;
+   int32_t logical_width_ = 0;
+   int32_t logical_height_ = 0;
++  void* legacy_readback_ = nullptr;
++  size_t legacy_readback_size_ = 0;
++  int32_t legacy_target_width_ = 0;
++  LegacySharedBuffer* legacy_shared_[2] = {nullptr, nullptr};
++  bool legacy_double_buffered_ = false;
++#ifdef AERA_UI_LEGACY_KGSL_GPU
++  LegacyScanout* legacy_scanout_ = nullptr;
++#endif
+   unsigned int next_buffer_ = 0;
+   bool driver_initialized_ = false;
++  bool legacy_fbdev_ = false;
+   bool ready_ = false;
+ };
+ 
+diff --git a/aeraui/core/legacy_mdss_abi.hpp b/aeraui/core/legacy_mdss_abi.hpp
+new file mode 100644
+index 0000000..780be56
+--- /dev/null
++++ b/aeraui/core/legacy_mdss_abi.hpp
+@@ -0,0 +1,61 @@
++/*
++ * Qualcomm MDSS atomic-display v1 userspace ABI subset.
++ * Layouts and constants correspond to include/uapi/linux/msm_mdp{,_ext}.h
++ * in xiaomi-msm8998-devs/android_kernel_xiaomi_msm8998 (lineage-24.0).
++ * These are kernel interface declarations, not an implementation of a driver.
++ */
++#pragma once
++#include <cstdint>
++#include <sys/ioctl.h>
++
++namespace aeraui::mdss {
++constexpr uint32_t kVersion = 0x00010000;
++constexpr uint32_t kValidate = 0x01;
++constexpr uint32_t kWaitForFinish = 0x02;
++constexpr uint32_t kRgba8888 = 13;
++constexpr uint32_t kOpaque = 1;
++constexpr unsigned long kAtomicCommit = _IOWR('S', 128, void*);
++struct Rect { uint32_t x, y, w, h; };
++struct Plane { int32_t fd; uint32_t offset, stride; };
++struct Buffer {
++  uint32_t width, height, format;
++  Plane planes[4];
++  uint32_t plane_count;
++  struct { uint32_t numer, denom; } comp_ratio;
++  int32_t fence;
++  uint32_t reserved;
++};
++struct InputLayer {
++  uint32_t flags, pipe_ndx;
++  uint8_t horz_deci, vert_deci, alpha;
++  uint16_t z_order;
++  uint32_t transp_mask, bg_color, blend_op, color_space;
++  Rect src_rect, dst_rect;
++  void* scale;
++  Buffer buffer;
++  void* pp_info;
++  int32_t error_code;
++  uint32_t rect_num, reserved[5];
++};
++struct CommitV1 {
++  uint32_t flags;
++  int32_t release_fence;
++  Rect left_roi, right_roi;
++  InputLayer* input_layers;
++  uint32_t input_layer_cnt;
++  void* output_layer;
++  int32_t retire_fence;
++  void* dest_scaler;
++  uint32_t dest_scaler_cnt, bl_level;
++#ifdef __LP64
++  // This spelling follows the vendor UAPI (not the usual __LP64__ macro).
++  uint32_t reserved[2];
++#else
++  uint32_t reserved[3];
++#endif
++};
++struct Commit { uint32_t version; CommitV1 v1; };
++#if INTPTR_MAX == INT64_MAX
++static_assert(sizeof(Commit) == 112, "MDSS v1 commit ABI mismatch");
++#endif
++} // namespace aeraui::mdss
 diff --git a/aeraui/core/runner.cpp b/aeraui/core/runner.cpp
 index 29b39c8..c8fcc44 100644
 --- a/aeraui/core/runner.cpp
@@ -857,90 +1936,6 @@ index fa62662..0eb60ce 100644
      group keystore readproc log
 -    writepid /dev/cpuset/foreground/tasks
      seclabel u:r:recovery:s0
-diff --git a/minuitwrp/graphics.cpp b/minuitwrp/graphics.cpp
-index 0669f36..b09af60 100644
---- a/minuitwrp/graphics.cpp
-+++ b/minuitwrp/graphics.cpp
-@@ -720,6 +720,27 @@ void gr_fb_blank(bool blank)
-     gr_backend->blank(gr_backend, blank);
- }
- 
-+int gr_get_frame_target(unsigned char** data, int* width, int* height,
-+                        int* row_bytes, __u32* format)
-+{
-+    if (!data || !width || !height || !row_bytes || !format)
-+        return -1;
-+    if (!gr_draw || !gr_draw->data || gr_rotation != 0 ||
-+        overscan_offset_x != 0 || overscan_offset_y != 0 ||
-+        gr_draw->pixel_bytes != 4)
-+        return -1;
-+    if (gr_draw->format != GGL_PIXEL_FORMAT_RGBA_8888 &&
-+        gr_draw->format != GGL_PIXEL_FORMAT_RGBX_8888 &&
-+        gr_draw->format != GGL_PIXEL_FORMAT_BGRA_8888)
-+        return -1;
-+    *data = gr_draw->data;
-+    *width = gr_draw->width;
-+    *height = gr_draw->height;
-+    *row_bytes = gr_draw->row_bytes;
-+    *format = gr_draw->format;
-+    return 0;
-+}
-+
- int gr_get_surface(gr_surface* surface)
- {
-     GGLSurface* ms = (GGLSurface*)malloc(sizeof(GGLSurface));
-diff --git a/minuitwrp/include/minuitwrp/minui.h b/minuitwrp/include/minuitwrp/minui.h
-index 269f2bd..736c13a 100644
---- a/minuitwrp/include/minuitwrp/minui.h
-+++ b/minuitwrp/include/minuitwrp/minui.h
-@@ -51,6 +51,8 @@ void gr_exit(void);
- int gr_fb_width(void);
- int gr_fb_height(void);
- gr_pixel *gr_fb_data(void);
-+int gr_get_frame_target(unsigned char** data, int* width, int* height,
-+                        int* row_bytes, __u32* format);
- void gr_flip(void);
- // Optical fingerprint frontends mark only frames containing the lit sensor.
- void gr_set_fingerprint_pressed(bool pressed);
-diff --git a/minuitwrp/resources.cpp b/minuitwrp/resources.cpp
-index 2db6536..7b671c6 100644
---- a/minuitwrp/resources.cpp
-+++ b/minuitwrp/resources.cpp
-@@ -447,9 +447,6 @@ int res_scale_surface(gr_surface source, gr_surface* destination, float scale_w,
-     gl = NULL;
-     // put the scaled surface in our destination
-     *destination = (gr_surface*) sc_mem_surface;
--    // free memory used in the source
--    res_free_surface(source);
--    source = NULL;
-     return 0;
- }
- 
-diff --git a/partition.cpp b/partition.cpp
-index 8f4feef..7a7e3d9 100644
---- a/partition.cpp
-+++ b/partition.cpp
-@@ -839,9 +839,18 @@ if (TWFunc::Path_Exists("/data/unencrypted/key/version")) {
- 	ExcludeAll(Mount_Point + "/cache");
- 	ExcludeAll(Mount_Point + "/per_boot"); // removed each boot by init
- 	ExcludeAll(Mount_Point + "/gsi"); // cow devices
--	int retry_count = 3;
-+	for (int wait_step = 0; wait_step < 100; ++wait_step) {
-+		std::string crypto_ready = android::base::GetProperty("crypto.ready", "");
-+		std::string listeners_ready = android::base::GetProperty("vendor.sys.listeners.registered", "");
-+		if (crypto_ready == "1" && listeners_ready == "true") {
-+			break;
-+		}
-+		usleep(100000);
-+	}
-+	usleep(300000);
-+	int retry_count = 20;
- 	while (!android::keystore::Decrypt_DE() && --retry_count)
--		usleep(2000);
-+		usleep(250000);
- 	if (retry_count > 0) {
- 		PartitionManager.Set_Crypto_State();
- 		Is_Encrypted = true;
 diff --git a/gpt/gpt.c b/gpt/gpt.c
 index 068a244..5c41e1d 100644
 --- a/gpt/gpt.c
@@ -981,6 +1976,493 @@ index 068a244..5c41e1d 100644
          free(unaligned);
  
          /* Kludge.  This is necessary to read/write the last
+diff --git a/minuitwrp/graphics.cpp b/minuitwrp/graphics.cpp
+index 0669f36..2dd0421 100644
+--- a/minuitwrp/graphics.cpp
++++ b/minuitwrp/graphics.cpp
+@@ -33,6 +33,7 @@
+ #include <linux/kd.h>
+ 
+ #include <time.h>
++#include <pthread.h>
+ 
+ #include <cutils/properties.h>
+ #include <pixelflinger/pixelflinger.h>
+@@ -613,7 +614,40 @@ unsigned int gr_get_height(gr_surface surface) {
+     return ((GGLSurface*) surface)->height;
+ }
+ 
++void* gr_get_rgba_frame_target(int width, int height, int* pitch_pixels) {
++    if (!pitch_pixels || !gr_draw || !gr_draw->data || width <= 0 || height <= 0 ||
++        gr_rotation != 0 || overscan_offset_x != 0 || overscan_offset_y != 0 ||
++        gr_draw->width != width || gr_draw->height != height ||
++        gr_draw->pixel_bytes != 4 ||
++        (gr_draw->format != GGL_PIXEL_FORMAT_RGBA_8888 &&
++         gr_draw->format != GGL_PIXEL_FORMAT_RGBX_8888)) {
++        return nullptr;
++    }
++    const size_t row_size = static_cast<size_t>(width) * 4;
++    if (gr_draw->row_bytes <= 0 || gr_draw->row_bytes % 4 != 0 ||
++        static_cast<size_t>(gr_draw->row_bytes) < row_size)
++        return nullptr;
++    *pitch_pixels = gr_draw->row_bytes / 4;
++    return gr_draw->data;
++}
++
++bool gr_copy_rgba_frame(const void* pixels, int width, int height) {
++    int pitch_pixels = 0;
++    auto* target = static_cast<unsigned char*>(
++        gr_get_rgba_frame_target(width, height, &pitch_pixels));
++    if (pixels == nullptr || target == nullptr)
++        return false;
++    const size_t row_size = static_cast<size_t>(width) * 4;
++    const unsigned char* src = static_cast<const unsigned char*>(pixels);
++    for (int y = 0; y < height; ++y) {
++        memcpy(target + static_cast<size_t>(y) * pitch_pixels * 4,
++               src + static_cast<size_t>(y) * row_size, row_size);
++    }
++    return true;
++}
++
+ void gr_flip() {
++    gr_wait_legacy_gpu_present();
+     gr_draw = gr_backend->flip(gr_backend);
+     // On double buffered back ends, when we flip, we need to tell
+     // pixel flinger to draw to the other buffer
+@@ -621,7 +655,59 @@ void gr_flip() {
+     gr_context->colorBuffer(gr_context, &gr_mem_surface);
+ }
+ 
++bool gr_present_legacy_gpu_async() {
++    if (gr_backend != open_fbdev() || gr_rotation != 0 ||
++        overscan_offset_x != 0 || overscan_offset_y != 0)
++        return false;
++    return fbdev_present_async();
++}
++
++void gr_wait_legacy_gpu_present() {
++    fbdev_wait_present();
++}
++
++bool gr_present_legacy_gpu_buffer(const void* pixels, int width, int height, int stride) {
++    int pitch = 0;
++    if (pixels == nullptr || gr_backend != open_fbdev() ||
++        gr_get_rgba_frame_target(width, height, &pitch) == nullptr) return false;
++    return fbdev_present_external_async(pixels, width, height, stride);
++}
++
++static pthread_mutex_t legacy_capture_mutex = PTHREAD_MUTEX_INITIALIZER;
++static gr_surface (*legacy_capture)(void*);
++static void* legacy_capture_owner;
++
++void gr_set_legacy_gpu_capture(gr_surface (*capture)(void*), void* owner) {
++    pthread_mutex_lock(&legacy_capture_mutex);
++    legacy_capture = capture;
++    legacy_capture_owner = owner;
++    pthread_mutex_unlock(&legacy_capture_mutex);
++}
++
++int gr_legacy_gpu_dup_fb() {
++    if (gr_backend != open_fbdev() || gr_rotation != 0 ||
++        overscan_offset_x != 0 || overscan_offset_y != 0) return -1;
++    return fbdev_dup_fd();
++}
++
++gr_surface gr_get_legacy_gpu_surface() {
++    if (gr_backend != open_fbdev()) return nullptr;
++    pthread_mutex_lock(&legacy_capture_mutex);
++    gr_surface surface = legacy_capture ? legacy_capture(legacy_capture_owner) : nullptr;
++    pthread_mutex_unlock(&legacy_capture_mutex);
++    return surface ? surface : fbdev_presented_surface();
++}
++
+ static void get_memory_surface(GGLSurface* ms) {
++    // Only materialize the CPU snapshot on demand when the legacy GPU has
++    // bypassed gr_draw. Normal rendering must not pay for this extra copy.
++    const auto* presented = static_cast<const GRSurface*>(gr_get_legacy_gpu_surface());
++    if (presented != nullptr) {
++        for (int y = 0; y < gr_draw->height; ++y)
++            memcpy(gr_draw->data + static_cast<size_t>(y) * gr_draw->row_bytes,
++                   presented->data + static_cast<size_t>(y) * presented->row_bytes,
++                   static_cast<size_t>(gr_draw->width) * gr_draw->pixel_bytes);
++    }
+     ms->version = sizeof(*ms);
+     ms->width = gr_draw->width;
+     ms->height = gr_draw->height;
+@@ -698,6 +784,7 @@ int gr_init(void)
+ 
+ void gr_exit(void)
+ {
++    gr_wait_legacy_gpu_present();
+     gr_backend->exit(gr_backend);
+ }
+ 
+@@ -717,9 +804,31 @@ int gr_fb_height(void)
+ 
+ void gr_fb_blank(bool blank)
+ {
++    gr_wait_legacy_gpu_present();
+     gr_backend->blank(gr_backend, blank);
+ }
+ 
++int gr_get_frame_target(unsigned char** data, int* width, int* height,
++                        int* row_bytes, __u32* format)
++{
++    if (!data || !width || !height || !row_bytes || !format)
++        return -1;
++    if (!gr_draw || !gr_draw->data || gr_rotation != 0 ||
++        overscan_offset_x != 0 || overscan_offset_y != 0 ||
++        gr_draw->pixel_bytes != 4)
++        return -1;
++    if (gr_draw->format != GGL_PIXEL_FORMAT_RGBA_8888 &&
++        gr_draw->format != GGL_PIXEL_FORMAT_RGBX_8888 &&
++        gr_draw->format != GGL_PIXEL_FORMAT_BGRA_8888)
++        return -1;
++    *data = gr_draw->data;
++    *width = gr_draw->width;
++    *height = gr_draw->height;
++    *row_bytes = gr_draw->row_bytes;
++    *format = gr_draw->format;
++    return 0;
++}
++
+ int gr_get_surface(gr_surface* surface)
+ {
+     GGLSurface* ms = (GGLSurface*)malloc(sizeof(GGLSurface));
+@@ -730,7 +839,7 @@ int gr_get_surface(gr_surface* surface)
+     ms->data = (GGLubyte*)malloc(ms->stride * ms->height * gr_draw->pixel_bytes);
+ 
+     // Now, copy the data
+-    memcpy(ms->data, gr_mem_surface.data, gr_draw->width * gr_draw->height * gr_draw->pixel_bytes / 8);
++    memcpy(ms->data, gr_mem_surface.data, static_cast<size_t>(gr_draw->height) * gr_draw->row_bytes);
+ 
+     *surface = (gr_surface*) ms;
+     return 0;
+@@ -749,5 +858,7 @@ int gr_free_surface(gr_surface surface)
+ 
+ void gr_write_frame_to_file(int fd)
+ {
+-    write(fd, gr_mem_surface.data, gr_draw->width * gr_draw->height * gr_draw->pixel_bytes / 8);
++    GGLSurface snapshot{};
++    get_memory_surface(&snapshot);
++    write(fd, snapshot.data, static_cast<size_t>(gr_draw->height) * gr_draw->row_bytes);
+ }
+diff --git a/minuitwrp/graphics.h b/minuitwrp/graphics.h
+index a6c76e9..2c083ba 100644
+--- a/minuitwrp/graphics.h
++++ b/minuitwrp/graphics.h
+@@ -37,6 +37,11 @@ struct minui_backend {
+ };
+ 
+ minui_backend* open_fbdev();
++int fbdev_dup_fd();
++bool fbdev_present_async();
++bool fbdev_present_external_async(const void* pixels, int width, int height, int stride);
++GRSurface* fbdev_presented_surface();
++void fbdev_wait_present();
+ minui_backend* open_drm();
+ minui_backend* open_overlay();
+ 
+diff --git a/minuitwrp/graphics_fbdev.cpp b/minuitwrp/graphics_fbdev.cpp
+index 499e0ea..f0f2fe3 100644
+--- a/minuitwrp/graphics_fbdev.cpp
++++ b/minuitwrp/graphics_fbdev.cpp
+@@ -21,6 +21,10 @@
+ 
+ #include <fcntl.h>
+ #include <stdio.h>
++#include <pthread.h>
++#include <time.h>
++#include <android/log.h>
++#include <sys/system_properties.h>
+ 
+ #include <sys/cdefs.h>
+ #include <sys/ioctl.h>
+@@ -48,6 +52,139 @@ static fb_var_screeninfo vi;
+ static int fb_fd = -1;
+ static __u32 smem_len;
+ 
++// Only the legacy GPU renderer opts in. The worker reads the CPU drawing
++// buffer, never modifies it, and never owns an EGL context. There is at most
++// one pending flip; its producer waits before overwriting the buffer.
++static pthread_mutex_t present_mutex = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t present_condition = PTHREAD_COND_INITIALIZER;
++static pthread_t present_thread;
++static bool present_started;
++static bool present_pending;
++static bool present_stop;
++static const unsigned char* present_pixels;
++static int present_stride;
++static bool external_frame;
++static void set_displayed_framebuffer(unsigned n);
++static uint64_t monotonic_ns();
++
++static void present_external_frame() {
++    char profile_value[PROP_VALUE_MAX]{};
++    __system_property_get("debug.aera.gpu_profile", profile_value);
++    const bool profile = profile_value[0] == '1';
++    const uint64_t begin = profile ? monotonic_ns() : 0;
++    GRSurface& target = gr_framebuffer[1 - displayed_buffer];
++    const size_t bytes = static_cast<size_t>(target.width) * 4;
++    if (present_stride == target.row_bytes) {
++        memcpy(target.data, present_pixels, static_cast<size_t>(target.height) * target.row_bytes);
++    } else {
++        for (int y = 0; y < target.height; ++y)
++            memcpy(target.data + static_cast<size_t>(y) * target.row_bytes,
++                   present_pixels + static_cast<size_t>(y) * present_stride, bytes);
++    }
++    const uint64_t copied = profile ? monotonic_ns() : 0;
++    set_displayed_framebuffer(1 - displayed_buffer);
++    external_frame = true;
++    if (profile) {
++        static uint64_t total_copy = 0, total_flip = 0;
++        static unsigned frames = 0;
++        total_copy += copied - begin;
++        total_flip += monotonic_ns() - copied;
++        if (++frames == 60) {
++            __android_log_print(ANDROID_LOG_INFO, "AeraFbdev",
++                "shared 60 frames: direct copy %.2f ms, flip wait %.2f ms",
++                total_copy / 60000000.0, total_flip / 60000000.0);
++            total_copy = total_flip = frames = 0;
++        }
++    }
++}
++
++static uint64_t monotonic_ns() {
++    timespec now{};
++    clock_gettime(CLOCK_MONOTONIC, &now);
++    return static_cast<uint64_t>(now.tv_sec) * 1000000000ULL + now.tv_nsec;
++}
++
++static void* present_loop(void*) {
++    pthread_setname_np(pthread_self(), "aera-fb-present");
++    pthread_mutex_lock(&present_mutex);
++    for (;;) {
++        while (!present_pending && !present_stop)
++            pthread_cond_wait(&present_condition, &present_mutex);
++        if (!present_pending && present_stop) break;
++        pthread_mutex_unlock(&present_mutex);
++        if (present_pixels != nullptr) present_external_frame();
++        else fbdev_flip(nullptr);
++        pthread_mutex_lock(&present_mutex);
++        present_pending = false;
++        present_pixels = nullptr;
++        pthread_cond_broadcast(&present_condition);
++    }
++    pthread_mutex_unlock(&present_mutex);
++    return nullptr;
++}
++
++bool fbdev_present_external_async(const void* pixels, int width, int height, int stride) {
++#ifdef RECOVERY_BGRA
++    // This variant swaps bytes in the producer's buffer during flip.
++    return false;
++#else
++    if (fb_fd < 0 || gr_draw == nullptr || !double_buffered ||
++        gr_draw->pixel_bytes != 4)
++        return false;
++    if (pixels != nullptr && (width != gr_draw->width || height != gr_draw->height ||
++        width <= 0 || width > INT32_MAX / 4 || stride < width * 4)) return false;
++    pthread_mutex_lock(&present_mutex);
++    if (present_stop || present_pending) {
++        pthread_mutex_unlock(&present_mutex);
++        return false;
++    }
++    if (!present_started) {
++        if (pthread_create(&present_thread, nullptr, present_loop, nullptr) != 0) {
++            pthread_mutex_unlock(&present_mutex);
++            return false;
++        }
++        present_started = true;
++        __android_log_print(ANDROID_LOG_INFO, "AeraFbdev",
++                            "single-flight GPU presentation worker ready");
++    }
++    present_pixels = static_cast<const unsigned char*>(pixels);
++    present_stride = stride;
++    present_pending = true;
++    pthread_cond_broadcast(&present_condition);
++    pthread_mutex_unlock(&present_mutex);
++    return true;
++#endif
++}
++
++bool fbdev_present_async() {
++    return fbdev_present_external_async(nullptr, 0, 0, 0);
++}
++
++GRSurface* fbdev_presented_surface() {
++    fbdev_wait_present();
++    return external_frame && fb_fd >= 0 ? &gr_framebuffer[displayed_buffer] : nullptr;
++}
++
++void fbdev_wait_present() {
++    pthread_mutex_lock(&present_mutex);
++    while (present_pending)
++        pthread_cond_wait(&present_condition, &present_mutex);
++    pthread_mutex_unlock(&present_mutex);
++}
++
++static void stop_present_worker() {
++    pthread_mutex_lock(&present_mutex);
++    const bool join = present_started;
++    present_stop = true;
++    pthread_cond_broadcast(&present_condition);
++    pthread_mutex_unlock(&present_mutex);
++    if (join) pthread_join(present_thread, nullptr);
++    pthread_mutex_lock(&present_mutex);
++    present_started = false;
++    present_stop = false;
++    pthread_mutex_unlock(&present_mutex);
++}
++
+ static minui_backend my_backend = {
+     .init = fbdev_init,
+     .flip = fbdev_flip,
+@@ -59,6 +196,11 @@ minui_backend* open_fbdev() {
+     return &my_backend;
+ }
+ 
++int fbdev_dup_fd() {
++    fbdev_wait_present();
++    return fb_fd < 0 ? -1 : fcntl(fb_fd, F_DUPFD_CLOEXEC, 0);
++}
++
+ static void fbdev_blank(minui_backend* backend __unused, bool blank)
+ {
+ #if defined(TW_NO_SCREEN_BLANK) && defined(TW_BRIGHTNESS_PATH) && defined(TW_MAX_BRIGHTNESS)
+@@ -283,6 +425,12 @@ static GRSurface* fbdev_init(minui_backend* backend) {
+ }
+ 
+ static GRSurface* fbdev_flip(minui_backend* backend __unused) {
++    external_frame = false;
++    char profile_value[PROP_VALUE_MAX]{};
++    __system_property_get("debug.aera.gpu_profile", profile_value);
++    const bool profile = profile_value[0] == '1';
++    const uint64_t begin = profile ? monotonic_ns() : 0;
++    uint64_t copied = begin;
+ #if defined(RECOVERY_BGRA)
+     // In case of BGRA, do some byte swapping
+     unsigned char* ucfb_vaddr = (unsigned char*)gr_draw->data;
+@@ -297,16 +445,33 @@ static GRSurface* fbdev_flip(minui_backend* backend __unused) {
+         // Copy from the in-memory surface to the framebuffer.
+         memcpy(gr_framebuffer[1-displayed_buffer].data, gr_draw->data,
+                gr_draw->height * gr_draw->row_bytes);
++        copied = profile ? monotonic_ns() : 0;
+         set_displayed_framebuffer(1-displayed_buffer);
+     } else {
+         // Copy from the in-memory surface to the framebuffer.
+         memcpy(gr_framebuffer[0].data, gr_draw->data,
+                gr_draw->height * gr_draw->row_bytes);
++        copied = profile ? monotonic_ns() : 0;
++    }
++    if (profile) {
++        static uint64_t copy_total = 0, flip_total = 0;
++        static unsigned frames = 0;
++        copy_total += copied - begin;
++        flip_total += monotonic_ns() - copied;
++        if (++frames == 60) {
++            __android_log_print(ANDROID_LOG_INFO, "AeraFbdev",
++                                "60 frames: framebuffer copy %.2f ms, flip wait %.2f ms",
++                                copy_total / 60000000.0, flip_total / 60000000.0);
++            frames = 0;
++            copy_total = flip_total = 0;
++        }
+     }
+     return gr_draw;
+ }
+ 
+ static void fbdev_exit(minui_backend* backend __unused) {
++    stop_present_worker();
++    external_frame = false;
+     close(fb_fd);
+     fb_fd = -1;
+ 
+diff --git a/minuitwrp/graphics_utils.cpp b/minuitwrp/graphics_utils.cpp
+index 165de60..52ed45b 100644
+--- a/minuitwrp/graphics_utils.cpp
++++ b/minuitwrp/graphics_utils.cpp
+@@ -45,7 +45,8 @@ static void aera_jpeg_error_exit(j_common_ptr info)
+ static bool gr_capture_source(GGLSurface *source)
+ {
+     *source = gr_mem_surface;
+-    const gr_surface presented = gr_drm_get_presented_surface();
++    gr_surface presented = gr_drm_get_presented_surface();
++    if (presented == NULL) presented = gr_get_legacy_gpu_surface();
+     if (presented != NULL) {
+         const GRSurface *drm_surface = (const GRSurface *)presented;
+         source->version = sizeof(*source);
+diff --git a/minuitwrp/include/minuitwrp/minui.h b/minuitwrp/include/minuitwrp/minui.h
+index 269f2bd..70fd6e9 100644
+--- a/minuitwrp/include/minuitwrp/minui.h
++++ b/minuitwrp/include/minuitwrp/minui.h
+@@ -51,7 +51,28 @@ void gr_exit(void);
+ int gr_fb_width(void);
+ int gr_fb_height(void);
+ gr_pixel *gr_fb_data(void);
++int gr_get_frame_target(unsigned char** data, int* width, int* height,
++                        int* row_bytes, __u32* format);
+ void gr_flip(void);
++// Copy an already-composited RGBA frame without software alpha blending.
++// Returns false when layout/rotation requires the normal blitter instead.
++bool gr_copy_rgba_frame(const void* pixels, int width, int height);
++// Writable CPU drawing buffer for an unrotated RGBA/RGBX frame. The pitch is
++// in pixels and may exceed width. Reacquire after every flip; do not retain it.
++void* gr_get_rgba_frame_target(int width, int height, int* pitch_pixels);
++// Legacy GPU only: enqueue one framebuffer presentation. The GPU may draw
++// its next off-screen frame while this runs, but must wait before writing
++// the CPU drawing buffer again. Returns false for unsupported backends.
++bool gr_present_legacy_gpu_async();
++// Borrow a CPU-locked RGBA buffer until gr_wait_legacy_gpu_present returns.
++// stride is in bytes. No ownership transfer and no intermediate full-frame copy.
++bool gr_present_legacy_gpu_buffer(const void* pixels, int width, int height, int stride);
++gr_surface gr_get_legacy_gpu_surface();
++// The renderer owns the provider; unregister before destroying it. Captures
++// materialize CPU pixels only on demand. The fd is a caller-owned duplicate.
++void gr_set_legacy_gpu_capture(gr_surface (*capture)(void*), void* owner);
++int gr_legacy_gpu_dup_fb();
++void gr_wait_legacy_gpu_present();
+ // Optical fingerprint frontends mark only frames containing the lit sensor.
+ void gr_set_fingerprint_pressed(bool pressed);
+ bool gr_fingerprint_pressed(void);
+diff --git a/minuitwrp/resources.cpp b/minuitwrp/resources.cpp
+index 2db6536..7b671c6 100644
+--- a/minuitwrp/resources.cpp
++++ b/minuitwrp/resources.cpp
+@@ -447,9 +447,6 @@ int res_scale_surface(gr_surface source, gr_surface* destination, float scale_w,
+     gl = NULL;
+     // put the scaled surface in our destination
+     *destination = (gr_surface*) sc_mem_surface;
+-    // free memory used in the source
+-    res_free_surface(source);
+-    source = NULL;
+     return 0;
+ }
+ 
+diff --git a/partition.cpp b/partition.cpp
+index 8f4feef..7a7e3d9 100644
+--- a/partition.cpp
++++ b/partition.cpp
+@@ -839,9 +839,18 @@ if (TWFunc::Path_Exists("/data/unencrypted/key/version")) {
+ 	ExcludeAll(Mount_Point + "/cache");
+ 	ExcludeAll(Mount_Point + "/per_boot"); // removed each boot by init
+ 	ExcludeAll(Mount_Point + "/gsi"); // cow devices
+-	int retry_count = 3;
++	for (int wait_step = 0; wait_step < 100; ++wait_step) {
++		std::string crypto_ready = android::base::GetProperty("crypto.ready", "");
++		std::string listeners_ready = android::base::GetProperty("vendor.sys.listeners.registered", "");
++		if (crypto_ready == "1" && listeners_ready == "true") {
++			break;
++		}
++		usleep(100000);
++	}
++	usleep(300000);
++	int retry_count = 20;
+ 	while (!android::keystore::Decrypt_DE() && --retry_count)
+-		usleep(2000);
++		usleep(250000);
+ 	if (retry_count > 0) {
+ 		PartitionManager.Set_Crypto_State();
+ 		Is_Encrypted = true;
 diff --git a/partitionmanager.cpp b/partitionmanager.cpp
 index d04b64a..ddc0d00 100755
 --- a/partitionmanager.cpp

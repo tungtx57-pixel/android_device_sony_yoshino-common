@@ -1,0 +1,20 @@
+diff --git a/aera_soong_config.mk b/aera_soong_config.mk
+index d9d2fe3..c1c18bd 100644
+--- a/aera_soong_config.mk
++++ b/aera_soong_config.mk
+@@ -20,6 +20,7 @@ $(call add_soong_config_var,twrpVarsPlugin,\
+     AERA_ENABLE_EFISP \
+     AERA_SUPPORT_FINGERPRINT \
+     AERA_UI_ADAPTIVE_RESOLUTION \
++    AERA_UI_LEGACY_KGSL_GPU \
+     AERA_SCREEN_H \
+     AERA_STATUS_H \
+     AERA_STATUS_INDENT_LEFT \
+@@ -27,6 +28,7 @@ $(call add_soong_config_var,twrpVarsPlugin,\
+     AERA_DEFAULT_LANGUAGE \
+     AERA_EXTRA_LANGUAGES \
+     TW_SUPPORT_INPUT_FF_HAPTICS \
++    TW_USE_FSCRYPT_POLICY \
+     OF_ENABLE_WLAN \
+     OF_ENABLE_LAB \
+     OF_LANDSCAPE_MODE \

@@ -102,10 +102,20 @@ TW_USE_FSCRYPT_POLICY := 1
 OF_DEFAULT_KEYMASTER_VERSION := 3.0
 TW_FORCE_KEYMASTER_VER := true
 
-# Export TW_USE_FSCRYPT_POLICY to Soong twrpVarsPlugin for system/vold v1 policy
+# Export FBE v1, Legacy KGSL GPU, and WLAN flags to Soong twrpVarsPlugin
+AERA_UI_LEGACY_KGSL_GPU := true
+AERA_ENABLE_WLAN := 1
+OF_ENABLE_WLAN := 1
+AERA_EXCLUDE_OFFLINE_ROOT_PROVIDERS := 1
+
 SOONG_CONFIG_NAMESPACES += twrpVarsPlugin
-SOONG_CONFIG_twrpVarsPlugin += TW_USE_FSCRYPT_POLICY
+SOONG_CONFIG_twrpVarsPlugin += \
+    TW_USE_FSCRYPT_POLICY \
+    AERA_UI_LEGACY_KGSL_GPU \
+    OF_ENABLE_WLAN
 SOONG_CONFIG_twrpVarsPlugin_TW_USE_FSCRYPT_POLICY := $(TW_USE_FSCRYPT_POLICY)
+SOONG_CONFIG_twrpVarsPlugin_AERA_UI_LEGACY_KGSL_GPU := true
+SOONG_CONFIG_twrpVarsPlugin_OF_ENABLE_WLAN := true
 
 ### RECOVERY MODULES & RELINK LIBRARIES
 # Note: recovery/lib64/libandroidicu.so is copied into the device recovery ramdisk
@@ -126,10 +136,12 @@ AERA_RECOVERY_ADDITIONAL_RELINK_LIBRARY_FILES += \
     $(TARGET_OUT_SHARED_LIBRARIES)/libboot_control_client.so \
     $(TARGET_OUT_SHARED_LIBRARIES)/android.hardware.weaver@1.0.so
 
-### INIT & USB
+### INIT, USB & WIFI
 AERA_EXCLUDE_DEFAULT_USB_INIT := true
 TW_EXCLUDE_DEFAULT_USB_INIT := true
-TARGET_RECOVERY_DEVICE_MODULES += init.recovery.usb.rc
+TARGET_RECOVERY_DEVICE_MODULES += \
+    init.recovery.usb.rc \
+    init.recovery.wifi.rc
 TARGET_USE_CUSTOM_LUN_FILE_PATH := /config/usb_gadget/g1/functions/mass_storage.0/lun.%d/file
 
 ### QCOM SPECIFICS

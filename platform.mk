@@ -17,8 +17,9 @@ PRODUCT_CHECK_PREBUILT_MAX_PAGE_SIZE := false
 # Inherit from hardware-specific part of the product configuration
 $(call inherit-product-if-exists, $(PLATFORM_PATH)/vendor_blobs.mk)
 
-# QCOM FBE Decryption packages
+# QCOM FBE Decryption and AERA packages
 PRODUCT_PACKAGES += \
+    aera-browser-jail \
     qcom_decrypt \
     qcom_decrypt_fbe
 
@@ -26,6 +27,7 @@ PRODUCT_PACKAGES += \
 PRODUCT_COPY_FILES += \
     system/core/libprocessgroup/profiles/task_profiles.json:$(TARGET_COPY_OUT_RECOVERY)/root/system/etc/task_profiles.json
 
-# Adreno 540 EGL hardware property
+# Adreno 540 EGL and MSM8998 Gralloc hardware properties
 PRODUCT_VENDOR_PROPERTIES += \
-    ro.hardware.egl=adreno
+    ro.hardware.egl=adreno \
+    ro.hardware.gralloc=msm8998

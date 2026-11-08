@@ -1,0 +1,980 @@
+diff --git a/Android.bp b/Android.bp
+index 2d2808c..e9e48ed 100644
+--- a/Android.bp
++++ b/Android.bp
+@@ -13,7 +13,10 @@ cc_library_static {
+     name: "liblvgl_recovery",
+     recovery_available: true,
+     srcs: ["src/**/*.c"],
+-    shared_libs: ["libft2"],
++    shared_libs: [
++        "libft2",
++        "liblog",
++    ],
+     export_include_dirs: [
+         ".",
+         "src",
+diff --git a/src/draw/opengles/lv_draw_opengles.c b/src/draw/opengles/lv_draw_opengles.c
+index 2f1f907..a310673 100644
+--- a/src/draw/opengles/lv_draw_opengles.c
++++ b/src/draw/opengles/lv_draw_opengles.c
+@@ -18,6 +18,7 @@
+ #include "../../misc/cache/lv_cache_entry_private.h"
+ #include "../../drivers/opengles/lv_opengles_debug.h"
+ #include "../../drivers/opengles/lv_opengles_texture.h"
++#include "../../drivers/opengles/lv_opengles_texture_private.h"
+ #include "../../drivers/opengles/lv_opengles_driver.h"
+ #include "../../drivers/opengles/lv_opengles_private.h"
+ #include "../../draw/lv_draw_label.h"
+@@ -48,6 +49,8 @@ typedef struct {
+     lv_draw_task_t * task_act;
+     lv_cache_t * texture_cache;
+     unsigned int framebuffer;
++    unsigned int attached_texture;
++    bool target_bound;
+     lv_draw_buf_t render_draw_buf;
+     /* AERA's browser updates one full-screen variable image continuously.
+      * Keep its source-sized texture alive so a new frame is one upload and a
+@@ -78,6 +81,7 @@ typedef union {
+ } draw_dsc_key_t;
+ 
+ typedef struct {
++    lv_cache_slot_size_t slot;
+     draw_dsc_key_t draw_dsc;
+     int32_t w;
+     int32_t h;
+@@ -108,6 +112,8 @@ static bool draw_to_texture(lv_draw_opengles_unit_t * u, cache_data_t * cache_da
+ 
+ static unsigned int layer_get_texture(lv_layer_t * layer);
+ static unsigned int get_framebuffer(lv_draw_opengles_unit_t * u);
++static void bind_target(lv_draw_opengles_unit_t * u, unsigned int texture);
++static void finish_target(lv_draw_opengles_unit_t * u);
+ static unsigned int create_texture(int32_t w, int32_t h, const void * data);
+ 
+ #if LV_USE_3DTEXTURE
+@@ -120,6 +126,82 @@ static unsigned int create_texture(int32_t w, int32_t h, const void * data);
+ 
+ static lv_draw_opengles_unit_t * g_unit;
+ static bool runtime_enabled;
++static bool opacity_cache;
++static bool memory_cache;
++#define LEGACY_TEXTURE_BUDGET (64U * 1024U * 1024U)
++static bool cache_profile;
++static lv_opengles_cache_stats_t cache_stats;
++
++void lv_draw_opengles_set_opacity_cache(bool enabled)
++{
++    opacity_cache = enabled;
++    lv_opengles_set_draw_cache(enabled);
++}
++
++void lv_draw_opengles_invalidate_target(void)
++{
++    if(g_unit) {
++        g_unit->target_bound = false;
++        g_unit->attached_texture = 0;
++    }
++}
++
++static void bind_target(lv_draw_opengles_unit_t * u, unsigned int texture)
++{
++    if(texture == 0) {
++        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
++        u->target_bound = false;
++        return;
++    }
++    unsigned int framebuffer = get_framebuffer(u);
++    if(!opacity_cache || !u->target_bound) {
++        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, framebuffer));
++        u->target_bound = true;
++    }
++    if(!opacity_cache || u->attached_texture != texture) {
++        GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0));
++        u->attached_texture = texture;
++    }
++}
++
++static void finish_target(lv_draw_opengles_unit_t * u)
++{
++    if(!opacity_cache) {
++        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
++        u->target_bound = false;
++    }
++}
++
++void lv_draw_opengles_profile(bool enabled, lv_opengles_cache_stats_t * stats)
++{
++    cache_profile = enabled;
++    if(stats) {
++        *stats = cache_stats;
++        lv_memzero(&cache_stats, sizeof(cache_stats));
++    }
++    if(!enabled) lv_memzero(&cache_stats, sizeof(cache_stats));
++}
++
++static lv_opa_t cache_shape_opacity(lv_draw_task_type_t type, draw_dsc_key_t * key)
++{
++    if(!opacity_cache) return LV_OPA_COVER;
++    lv_opa_t * opa = NULL;
++    if(type == LV_DRAW_TASK_TYPE_FILL && key->fill.grad.dir == LV_GRAD_DIR_NONE)
++        opa = &key->fill.opa;
++    else if(type == LV_DRAW_TASK_TYPE_BORDER)
++        opa = &key->border.opa;
++    else if(type == LV_DRAW_TASK_TYPE_BOX_SHADOW)
++        opa = &key->box_shadow.opa;
++    else if(type == LV_DRAW_TASK_TYPE_LABEL &&
++            key->label.outline_stroke_width == 0 && key->label.decor == LV_TEXT_DECOR_NONE &&
++            key->label.sel_start == LV_DRAW_LABEL_NO_TXT_SEL &&
++            key->label.sel_end == LV_DRAW_LABEL_NO_TXT_SEL)
++        opa = &key->label.opa;
++    if(!opa) return LV_OPA_COVER;
++    lv_opa_t original = *opa;
++    *opa = LV_OPA_COVER;
++    return original;
++}
+ 
+ /**********************
+  *      MACROS
+@@ -137,8 +219,10 @@ void lv_draw_opengles_init(void)
+     draw_opengles_unit->base_unit.dispatch_cb = dispatch;
+     draw_opengles_unit->base_unit.evaluate_cb = evaluate;
+     draw_opengles_unit->base_unit.name = "OPENGLES";
+-    draw_opengles_unit->texture_cache = lv_cache_create(&lv_cache_class_lru_rb_count,
+-    sizeof(cache_data_t), LV_DRAW_OPENGLES_TEXTURE_CACHE_COUNT, (lv_cache_ops_t) {
++    memory_cache = opacity_cache;
++    draw_opengles_unit->texture_cache = lv_cache_create(
++    memory_cache ? &lv_cache_class_lru_rb_size : &lv_cache_class_lru_rb_count,
++    sizeof(cache_data_t), memory_cache ? LEGACY_TEXTURE_BUDGET : LV_DRAW_OPENGLES_TEXTURE_CACHE_COUNT, (lv_cache_ops_t) {
+         .compare_cb = (lv_cache_compare_cb_t)opengles_texture_cache_compare_cb,
+         .create_cb = (lv_cache_create_cb_t)opengles_texture_cache_create_cb,
+         .free_cb = (lv_cache_free_cb_t)opengles_texture_cache_free_cb,
+@@ -275,15 +359,12 @@ static int32_t dispatch(lv_draw_unit_t * draw_unit, lv_layer_t * layer)
+          * glTexImage2D(..., NULL) leaves their untouched transparent margins
+          * undefined, so rounded animated controls otherwise expose stale GPU
+          * memory around their edges. Initialize each off-screen layer once. */
+-        unsigned int framebuffer = get_framebuffer(draw_opengles_unit);
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, framebuffer));
+-        GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+-                                       GL_TEXTURE_2D, texture, 0));
++        bind_target(draw_opengles_unit, texture);
+         GL_CALL(glViewport(0, 0, w, h));
+         GL_CALL(glDisable(GL_SCISSOR_TEST));
+         GL_CALL(glClearColor(0.0f, 0.0f, 0.0f, 0.0f));
+         GL_CALL(glClear(GL_COLOR_BUFFER_BIT));
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
++        finish_target(draw_opengles_unit);
+     }
+ 
+     t->state = LV_DRAW_TASK_STATE_IN_PROGRESS;
+@@ -321,6 +402,7 @@ static int32_t evaluate(lv_draw_unit_t * draw_unit, lv_draw_task_t * task)
+ 
+ static bool draw_to_texture(lv_draw_opengles_unit_t * u, cache_data_t * cache_data)
+ {
++    uint32_t started = cache_profile ? lv_tick_get() : 0;
+     LV_PROFILER_DRAW_BEGIN;
+     lv_draw_task_t * task = u->task_act;
+ 
+@@ -462,6 +544,11 @@ static bool draw_to_texture(lv_draw_opengles_unit_t * u, cache_data_t * cache_da
+     cache_data->w = texture_w;
+     cache_data->h = texture_h;
+     cache_data->texture = texture;
++    if(cache_profile) {
++        ++cache_stats.misses;
++        cache_stats.raster_ms += lv_tick_elaps(started);
++        cache_stats.upload_bytes += (uint64_t)texture_w * texture_h * 4;
++    }
+ 
+     if(obj) {
+         lv_obj_set_flag(obj, LV_OBJ_FLAG_SEND_DRAW_TASK_EVENTS, original_send_draw_task_event);
+@@ -471,6 +558,30 @@ static bool draw_to_texture(lv_draw_opengles_unit_t * u, cache_data_t * cache_da
+     return true;
+ }
+ 
++static void layer_viewport(unsigned int texture, int32_t logical_width, int32_t logical_height)
++{
++    lv_opengles_texture_get_render_size(texture, &logical_width, &logical_height);
++    lv_opengles_viewport(0, 0, logical_width, logical_height);
++}
++
++/* Use the same rounded boundary for adjoining rectangles, avoiding gaps or
++ * double-clears when logical pixels map to fractional framebuffer pixels. */
++static int32_t raster_edge(int32_t edge, int32_t logical_size, int32_t raster_size)
++{
++    return (int32_t)(((int64_t)edge * raster_size + logical_size / 2) / logical_size);
++}
++
++static lv_area_t raster_area(const lv_area_t * area, int32_t logical_width, int32_t logical_height,
++                              int32_t raster_width, int32_t raster_height)
++{
++    lv_area_t result;
++    result.x1 = raster_edge(area->x1, logical_width, raster_width);
++    result.y1 = raster_edge(area->y1, logical_height, raster_height);
++    result.x2 = raster_edge(area->x2 + 1, logical_width, raster_width) - 1;
++    result.y2 = raster_edge(area->y2 + 1, logical_height, raster_height) - 1;
++    return result;
++}
++
+ static void blend_texture_layer(lv_draw_task_t * t)
+ {
+     LV_PROFILER_DRAW_BEGIN;
+@@ -497,13 +608,9 @@ static void blend_texture_layer(lv_draw_task_t * t)
+     lv_area_move(&area, -dest_layer->buf_area.x1,
+                  -dest_layer->buf_area.y1);
+ 
+-    if(target_texture) {
+-        unsigned int framebuffer = get_framebuffer(u);
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, framebuffer));
+-        GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target_texture, 0));
+-    }
++    bind_target(u, target_texture);
+ 
+-    lv_opengles_viewport(0, 0, targ_tex_w, targ_tex_h);
++    layer_viewport(target_texture, targ_tex_w, targ_tex_h);
+     // TODO rotation
+     bool h_flip = false;
+     bool v_flip = false;
+@@ -520,9 +627,7 @@ static void blend_texture_layer(lv_draw_task_t * t)
+     lv_opengles_render_texture(src_texture, &area, draw_dsc->opa, targ_tex_w, targ_tex_h, &clip_area, h_flip,
+                                !v_flip);
+ 
+-    if(target_texture) {
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+-    }
++    finish_target(u);
+ 
+     GL_CALL(glDeleteTextures(1, &src_texture));
+     LV_PROFILER_DRAW_END;
+@@ -573,21 +678,16 @@ static bool draw_streaming_image(lv_draw_task_t * t)
+     unsigned int target_texture = layer_get_texture(dest_layer);
+     const int32_t target_width = lv_area_get_width(&dest_layer->buf_area);
+     const int32_t target_height = lv_area_get_height(&dest_layer->buf_area);
+-    if(target_texture != 0) {
+-        unsigned int framebuffer = get_framebuffer(u);
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, framebuffer));
+-        GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+-                                       GL_TEXTURE_2D, target_texture, 0));
+-    }
++    bind_target(u, target_texture);
+ 
+-    lv_opengles_viewport(0, 0, target_width, target_height);
++    layer_viewport(target_texture, target_width, target_height);
+     lv_area_t clip_area = t->clip_area;
+     lv_area_move(&clip_area, -dest_layer->buf_area.x1, -dest_layer->buf_area.y1);
+     lv_area_t render_area = t->_real_area;
+     lv_area_move(&render_area, -dest_layer->buf_area.x1, -dest_layer->buf_area.y1);
+     lv_opengles_render_texture(u->streaming_texture, &render_area, draw_dsc->opa,
+                                target_width, target_height, &clip_area, false, false);
+-    if(target_texture != 0) GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
++    finish_target(u);
+     return true;
+ }
+ 
+@@ -602,20 +702,20 @@ static bool draw_backdrop_blur(lv_draw_opengles_unit_t * u, lv_draw_task_t * t)
+     if(!lv_area_intersect(&area, &t->area, &t->clip_area) ||
+        !lv_area_intersect(&area, &area, &layer->buf_area)) return true;
+ 
+-    const int32_t width = lv_area_get_width(&area);
+-    const int32_t height = lv_area_get_height(&area);
+     const int32_t target_width = lv_area_get_width(&layer->buf_area);
+     const int32_t target_height = lv_area_get_height(&layer->buf_area);
+     const unsigned int target_texture = layer_get_texture(layer);
+-    if(target_texture != 0) {
+-        const unsigned int framebuffer = get_framebuffer(u);
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, framebuffer));
+-        GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+-                                       GL_TEXTURE_2D, target_texture, 0));
+-    }
+-    else {
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+-    }
++    int32_t raster_width = target_width;
++    int32_t raster_height = target_height;
++    lv_opengles_texture_get_render_size(target_texture, &raster_width, &raster_height);
++    lv_area_t local_area = area;
++    lv_area_move(&local_area, -layer->buf_area.x1, -layer->buf_area.y1);
++    const lv_area_t sample_area = raster_area(&local_area, target_width, target_height,
++                                               raster_width, raster_height);
++    const int32_t width = lv_area_get_width(&sample_area);
++    const int32_t height = lv_area_get_height(&sample_area);
++    if(width <= 0 || height <= 0) return true;
++    bind_target(u, target_texture);
+ 
+     if(u->blur_texture == 0) GL_CALL(glGenTextures(1, &u->blur_texture));
+     if(u->blur_pass_texture == 0) GL_CALL(glGenTextures(1, &u->blur_pass_texture));
+@@ -639,38 +739,28 @@ static bool draw_backdrop_blur(lv_draw_opengles_unit_t * u, lv_draw_task_t * t)
+         u->blur_height = height;
+     }
+ 
+-    const int32_t source_x = area.x1 - layer->buf_area.x1;
+-    const int32_t source_y = target_height -
+-        (area.y2 - layer->buf_area.y1 + 1);
++    const int32_t source_x = sample_area.x1;
++    const int32_t source_y = raster_height - sample_area.y2 - 1;
+     GL_CALL(glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, source_x, source_y,
+                                width, height));
+ 
+-    const unsigned int framebuffer = get_framebuffer(u);
+-    GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, framebuffer));
+-    GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+-                                   GL_TEXTURE_2D, u->blur_pass_texture, 0));
++    bind_target(u, u->blur_pass_texture);
+     lv_area_t pass_area;
+     lv_area_set(&pass_area, 0, 0, width - 1, height - 1);
+     lv_opengles_viewport(0, 0, width, height);
+     lv_opengles_render_blur_texture(u->blur_texture, &pass_area, width, height,
+-                                    (float)dsc->blur_radius, 0.f, 1.f, 0.f);
++                                    (float)dsc->blur_radius * raster_width / target_width, 0.f, 1.f, 0.f);
+ 
+-    if(target_texture != 0) {
+-        GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+-                                       GL_TEXTURE_2D, target_texture, 0));
+-    }
+-    else {
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+-    }
++    bind_target(u, target_texture);
+ 
+     lv_area_t render_area = area;
+     lv_area_move(&render_area, -layer->buf_area.x1, -layer->buf_area.y1);
+-    lv_opengles_viewport(0, 0, target_width, target_height);
++    layer_viewport(target_texture, target_width, target_height);
+     lv_opengles_render_blur_texture(u->blur_pass_texture, &render_area,
+                                     target_width, target_height,
+                                     (float)dsc->blur_radius,
+                                     (float)dsc->corner_radius, 0.f, 1.f);
+-    if(target_texture != 0) GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
++    finish_target(u);
+     return true;
+ }
+ 
+@@ -705,6 +795,7 @@ static void draw_from_cached_texture(lv_draw_task_t * t)
+     data_to_find.h = lv_area_get_height(&t->_real_area);
+     data_to_find.text_hash = 0;
+     data_to_find.texture = 0;
++    const lv_opa_t shape_opa = cache_shape_opacity(t->type, &data_to_find.draw_dsc);
+ 
+     if(t->type == LV_DRAW_TASK_TYPE_LABEL) {
+         const lv_draw_label_dsc_t * label_dsc =
+@@ -785,19 +876,25 @@ static void draw_from_cached_texture(lv_draw_task_t * t)
+     /* Cache creation renders with the normalized descriptor and stores that
+      * descriptor in the cache. Restore the live task pointer immediately
+      * afterwards; the task itself is never modified. */
++    data_to_find.slot.size = (size_t)data_to_find.w * data_to_find.h * 4 + sizeof(cache_data_t);
+     t->draw_dsc = &data_to_find.draw_dsc.base;
+-    lv_cache_entry_t * entry_cached = lv_cache_acquire_or_create(u->texture_cache, &data_to_find, u);
++    bool transient = false;
++    lv_cache_entry_t * entry_cached = NULL;
++    if(memory_cache && data_to_find.slot.size > LEGACY_TEXTURE_BUDGET)
++        transient = draw_to_texture(u, &data_to_find);
++    else
++        entry_cached = lv_cache_acquire_or_create(u->texture_cache, &data_to_find, u);
+     t->draw_dsc = live_draw_dsc;
+ 
+     t->area = original_area;
+     t->_real_area = original_real_area;
+ 
+-    if(!entry_cached) {
++    if(!entry_cached && !transient) {
+         LV_PROFILER_DRAW_END;
+         return;
+     }
+ 
+-    cache_data_t * data_cached = lv_cache_entry_get_data(entry_cached);
++    cache_data_t * data_cached = transient ? &data_to_find : lv_cache_entry_get_data(entry_cached);
+     unsigned int texture = data_cached->texture;
+ 
+     lv_layer_t * dest_layer = t->target_layer;
+@@ -806,18 +903,14 @@ static void draw_from_cached_texture(lv_draw_task_t * t)
+     int32_t targ_tex_w = lv_area_get_width(&dest_layer->buf_area);
+     int32_t targ_tex_h = lv_area_get_height(&dest_layer->buf_area);
+ 
+-    if(target_texture) {
+-        unsigned int framebuffer = get_framebuffer(u);
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, framebuffer));
+-        GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target_texture, 0));
+-    }
++    bind_target(u, target_texture);
+ 
+-    lv_opengles_viewport(0, 0, targ_tex_w, targ_tex_h);
++    layer_viewport(target_texture, targ_tex_w, targ_tex_h);
+     lv_area_t clip_area = t->clip_area;
+     lv_area_move(&clip_area, -dest_layer->buf_area.x1, -dest_layer->buf_area.y1);
+     lv_area_t render_area = t->_real_area;
+     lv_area_move(&render_area, -dest_layer->buf_area.x1, -dest_layer->buf_area.y1);
+-    lv_opa_t render_opa = LV_OPA_COVER;
++    lv_opa_t render_opa = shape_opa;
+     if(gpu_scaled_image && t->type == LV_DRAW_TASK_TYPE_IMAGE)
+         render_opa = ((lv_draw_image_dsc_t *)live_draw_dsc)->opa;
+     const lv_draw_image_dsc_t * live_image_dsc =
+@@ -840,10 +933,13 @@ static void draw_from_cached_texture(lv_draw_task_t * t)
+                                    targ_tex_w, targ_tex_h, &clip_area, h_flip, v_flip);
+     }
+ 
+-    if(target_texture) {
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+-    }
++    finish_target(u);
+ 
++    if(transient) {
++        GL_CALL(glDeleteTextures(1, &texture));
++        LV_PROFILER_DRAW_END;
++        return;
++    }
+     lv_cache_release(u->texture_cache, entry_cached, u);
+ 
+     /*Do not cache modifiable images as they might change in the next frame
+@@ -866,6 +962,7 @@ static void draw_from_cached_texture(lv_draw_task_t * t)
+ 
+ static void execute_drawing(lv_draw_opengles_unit_t * u)
+ {
++    if(cache_profile) ++cache_stats.tasks;
+     lv_draw_task_t * t = u->task_act;
+     t->draw_unit = (lv_draw_unit_t *)u;
+ 
+@@ -884,17 +981,17 @@ static void execute_drawing(lv_draw_opengles_unit_t * u)
+             int32_t targ_tex_w = lv_area_get_width(&layer->buf_area);
+             int32_t targ_tex_h = lv_area_get_height(&layer->buf_area);
+ 
+-            if(target_texture) {
+-                unsigned int framebuffer = get_framebuffer(u);
+-                GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, framebuffer));
+-                GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target_texture, 0));
+-            }
++            bind_target(u, target_texture);
+ 
+             if(fill_dsc->opa >= LV_OPA_MAX) {
+-                float tex_w = (float)lv_area_get_width(&fill_area);
+-                float tex_h = (float)lv_area_get_height(&fill_area);
++                int32_t raster_width = targ_tex_w;
++                int32_t raster_height = targ_tex_h;
++                lv_opengles_texture_get_render_size(target_texture, &raster_width, &raster_height);
++                const lv_area_t scissor = raster_area(&fill_area, targ_tex_w, targ_tex_h,
++                                                       raster_width, raster_height);
+                 GL_CALL(glEnable(GL_SCISSOR_TEST));
+-                GL_CALL(glScissor(fill_area.x1, targ_tex_h - fill_area.y1 - tex_h, tex_w, tex_h));
++                GL_CALL(glScissor(scissor.x1, raster_height - scissor.y2 - 1,
++                                   lv_area_get_width(&scissor), lv_area_get_height(&scissor)));
+                 /* swap red and blue channels here as they will be swapped back during flushing*/
+                 GL_CALL(glClearColor((float)fill_dsc->color.blue / 255.0f, (float)fill_dsc->color.green / 255.0f,
+                                      (float)fill_dsc->color.red / 255.0f, 1.0f));
+@@ -903,13 +1000,11 @@ static void execute_drawing(lv_draw_opengles_unit_t * u)
+                 GL_CALL(glDisable(GL_SCISSOR_TEST));
+             }
+             else {
+-                lv_opengles_viewport(0, 0, targ_tex_w, targ_tex_h);
++                layer_viewport(target_texture, targ_tex_w, targ_tex_h);
+                 lv_opengles_render_fill(fill_dsc->color, &fill_area, fill_dsc->opa, targ_tex_w, targ_tex_h);
+             }
+ 
+-            if(target_texture) {
+-                GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+-            }
++            finish_target(u);
+ 
+             return;
+         }
+@@ -987,13 +1082,9 @@ static void lv_draw_opengles_3d(lv_draw_task_t * t, const lv_draw_3d_dsc_t * dsc
+     int32_t targ_tex_w = lv_area_get_width(&dest_layer->buf_area);
+     int32_t targ_tex_h = lv_area_get_height(&dest_layer->buf_area);
+ 
+-    if(target_texture) {
+-        unsigned int framebuffer = get_framebuffer(u);
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, framebuffer));
+-        GL_CALL(glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, target_texture, 0));
+-    }
++    bind_target(u, target_texture);
+ 
+-    lv_opengles_viewport(0, 0, targ_tex_w, targ_tex_h);
++    layer_viewport(target_texture, targ_tex_w, targ_tex_h);
+     lv_area_t clip_area = t->clip_area;
+     lv_area_move(&clip_area, -dest_layer->buf_area.x1, -dest_layer->buf_area.y1);
+ 
+@@ -1010,9 +1101,7 @@ static void lv_draw_opengles_3d(lv_draw_task_t * t, const lv_draw_3d_dsc_t * dsc
+     params.blend_opt = true;
+     lv_opengles_render(&params);
+ 
+-    if(target_texture) {
+-        GL_CALL(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+-    }
++    finish_target(u);
+     LV_PROFILER_DRAW_END;
+ }
+ #endif /*LV_USE_3DTEXTURE*/
+diff --git a/src/draw/opengles/lv_draw_opengles.h b/src/draw/opengles/lv_draw_opengles.h
+index 1c1b2bf..895e365 100644
+--- a/src/draw/opengles/lv_draw_opengles.h
++++ b/src/draw/opengles/lv_draw_opengles.h
+@@ -18,6 +18,7 @@ extern "C" {
+ #if LV_USE_DRAW_OPENGLES
+ 
+ #include <stdbool.h>
++#include <stdint.h>
+ 
+ /*********************
+  *      DEFINES
+@@ -36,6 +37,17 @@ void lv_draw_opengles_deinit(void);
+ 
+ /** Enable or disable registration of the OpenGL draw unit at lv_init(). */
+ void lv_draw_opengles_set_enabled(bool enabled);
++/** Keep uniform shape opacity in GPU blend state instead of the texture key. */
++void lv_draw_opengles_set_opacity_cache(bool enabled);
++/** Call before GL work outside this draw unit or after replacing layer textures. */
++void lv_draw_opengles_invalidate_target(void);
++typedef struct {
++    uint32_t tasks;
++    uint32_t misses;
++    uint32_t raster_ms;
++    uint64_t upload_bytes;
++} lv_opengles_cache_stats_t;
++void lv_draw_opengles_profile(bool enabled, lv_opengles_cache_stats_t * stats);
+ 
+ /**********************
+  *      MACROS
+diff --git a/src/drivers/opengles/lv_opengles_driver.c b/src/drivers/opengles/lv_opengles_driver.c
+index db1e754..452e098 100644
+--- a/src/drivers/opengles/lv_opengles_driver.c
++++ b/src/drivers/opengles/lv_opengles_driver.c
+@@ -22,6 +22,8 @@
+ #include "opengl_shader/lv_opengl_shader_internal.h"
+ #include "assets/lv_opengles_shader.h"
+ 
++#include <android/log.h>
++
+ /*********************
+  *      DEFINES
+  *********************/
+@@ -90,6 +92,53 @@ static unsigned int shader_id;
+ 
+ static const char * shader_names[] = { "u_Texture", "u_ColorDepth", "u_VertexTransform", "u_Opa", "u_IsFill", "u_FillColor", "u_SwapRB", "u_Hue", "u_Saturation", "u_Value", "u_IsBlur", "u_BlurParams", "u_BlurShape", "u_BlurDirection" };
+ static int shader_location[sizeof(shader_names) / sizeof(shader_names[0])];
++static bool shader_location_valid[sizeof(shader_names) / sizeof(shader_names[0])];
++static bool draw_cache_enabled;
++/* Uniforms belong to our program, not the currently bound framebuffer. Keep
++ * values across quads, but discard them when the context/program is recreated
++ * or an external renderer changes our GL objects. */
++static struct {
++    unsigned int size;
++    unsigned char value[9 * sizeof(float)];
++} uniform_cache[sizeof(shader_names) / sizeof(shader_names[0])];
++static float cached_vertices[LV_OPENGLES_VERTEX_BUFFER_LEN];
++static bool cached_vertices_valid;
++
++static void invalidate_draw_cache(void)
++{
++    lv_memzero(uniform_cache, sizeof(uniform_cache));
++    cached_vertices_valid = false;
++}
++
++void lv_opengles_set_draw_cache(bool enabled)
++{
++    if(draw_cache_enabled != enabled) invalidate_draw_cache();
++    draw_cache_enabled = enabled;
++}
++
++static int uniform_index(const char * name)
++{
++    for(size_t i = 0; i < sizeof(shader_names) / sizeof(shader_names[0]); ++i) {
++        if(lv_strcmp(shader_names[i], name) == 0) return (int)i;
++    }
++    LV_ASSERT_MSG(false, "Unknown OpenGL uniform");
++    return -1;
++}
++
++static bool update_uniform(int index, const void * value, size_t size)
++{
++    if(index < 0) return false;
++    if(!draw_cache_enabled) return true;
++    if(size > sizeof(uniform_cache[index].value)) {
++        uniform_cache[index].size = 0;
++        return true;
++    }
++    if(uniform_cache[index].size == size &&
++       lv_memcmp(uniform_cache[index].value, value, size) == 0) return false;
++    lv_memcpy(uniform_cache[index].value, value, size);
++    uniform_cache[index].size = size;
++    return true;
++}
+ 
+ /**********************
+  *      MACROS
+@@ -103,6 +152,7 @@ void lv_opengles_init(void)
+ {
+     if(is_init) return;
+ 
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu", "LVGL GL: blending");
+     lv_opengles_enable_blending(false);
+ 
+     unsigned int indices[] = {
+@@ -110,14 +160,20 @@ void lv_opengles_init(void)
+         2, 3, 0
+     };
+ 
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu", "LVGL GL: vertex buffer");
+     lv_opengles_vertex_buffer_init(NULL, sizeof(float) * LV_OPENGLES_VERTEX_BUFFER_LEN);
+ 
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu", "LVGL GL: vertex array");
+     lv_opengles_vertex_array_init();
+     lv_opengles_vertex_array_add_buffer();
+ 
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu", "LVGL GL: index buffer");
+     lv_opengles_index_buffer_init(indices, 6);
+ 
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu", "LVGL GL: shaders");
+     lv_result_t res = lv_opengles_shader_init();
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                        "LVGL GL: shader result %d", (int)res);
+     LV_ASSERT_MSG(res == LV_RESULT_OK, "Failed to initialize shaders");
+ 
+     lv_opengles_shader_bind();
+@@ -133,6 +189,7 @@ void lv_opengles_init(void)
+ #endif /*LV_USE_DRAW_NANOVG*/
+ 
+     is_init = true;
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu", "LVGL GL: ready");
+ }
+ 
+ void lv_opengles_deinit(void)
+@@ -331,6 +388,7 @@ void lv_opengles_viewport(int32_t x, int32_t y, int32_t w, int32_t h)
+ void lv_opengles_reinit_state(void)
+ {
+     LV_PROFILER_DRAW_BEGIN;
++    invalidate_draw_cache();
+ 
+     /* Rebind VAO, VBO, IBO to restore state after NanoVG or other external GL operations */
+     lv_opengles_vertex_array_bind();
+@@ -540,13 +598,18 @@ static void lv_opengles_disable_blending(void)
+ 
+ static void lv_opengles_vertex_buffer_init(const void * data, unsigned int size)
+ {
++    if(draw_cache_enabled && data && size == sizeof(cached_vertices) &&
++       cached_vertices_valid && lv_memcmp(cached_vertices, data, size) == 0) return;
+     if(vertex_buffer_id == 0) GL_CALL(glGenBuffers(1, &vertex_buffer_id));
+     GL_CALL(glBindBuffer(GL_ARRAY_BUFFER, vertex_buffer_id));
+     GL_CALL(glBufferData(GL_ARRAY_BUFFER, size, data, GL_DYNAMIC_DRAW));
++    cached_vertices_valid = draw_cache_enabled && data && size == sizeof(cached_vertices);
++    if(cached_vertices_valid) lv_memcpy(cached_vertices, data, size);
+ }
+ 
+ static void lv_opengles_vertex_buffer_deinit(void)
+ {
++    cached_vertices_valid = false;
+     if(vertex_buffer_id == 0) return;
+     GL_CALL(glDeleteBuffers(1, &vertex_buffer_id));
+     vertex_buffer_id = 0;
+@@ -633,19 +696,31 @@ static unsigned int lv_opengles_shader_manager_init(void)
+ {
+     for(lv_opengl_glsl_version_t version = LV_OPENGL_GLSL_VERSION_300ES; version < LV_OPENGL_GLSL_VERSION_LAST; ++version) {
+         LV_LOG_INFO("Trying GLSL version %s", lv_opengles_glsl_version_to_string(version));
++        __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                            "LVGL GL: preparing shader version %d", (int)version);
+         {
+             /* Initialize the shader manager*/
+             lv_opengl_shader_portions_t portions;
+             lv_opengles_shader_get_source(&portions, version);
++            __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                                "LVGL GL: shader sources %zu", portions.count);
+             char * vertex_shader = lv_opengles_shader_get_vertex(version);
++            __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                                "LVGL GL: vertex source ready");
+             char * frag_shader = lv_opengles_shader_get_fragment(version);
++            __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                                "LVGL GL: fragment source ready");
+             lv_opengl_shader_manager_init(&shader_manager, portions.all, portions.count, vertex_shader, frag_shader);
++            __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                                "LVGL GL: shader manager ready");
+             lv_free(vertex_shader);
+             lv_free(frag_shader);
+         }
+ 
+         lv_opengl_shader_params_t frag_shader = {.name = "__MAIN__.frag"};
+         lv_opengl_shader_params_t vert_shader = {.name = "__MAIN__.vert"};
++        __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                            "LVGL GL: compiling shader program");
+         lv_opengl_shader_program_t * program = lv_opengl_shader_manager_compile_program(&shader_manager, &frag_shader,
+                                                                                         &vert_shader, version);
+         if(program) {
+@@ -663,12 +738,16 @@ static lv_result_t lv_opengles_shader_init(void)
+     if(shader_id != 0) {
+         return LV_RESULT_OK;
+     }
++    lv_memzero(shader_location_valid, sizeof(shader_location_valid));
++    invalidate_draw_cache();
+     shader_id = lv_opengles_shader_manager_init();
+     return shader_id != 0 ? LV_RESULT_OK : LV_RESULT_INVALID;
+ }
+ 
+ static void lv_opengles_shader_deinit(void)
+ {
++    lv_memzero(shader_location_valid, sizeof(shader_location_valid));
++    invalidate_draw_cache();
+     if(shader_id == 0) return;
+     /* The program is part of the manager and as such will be destroyed inside */
+     lv_opengl_shader_manager_deinit(&shader_manager);
+@@ -687,16 +766,9 @@ static void lv_opengles_shader_unbind(void)
+ 
+ static int lv_opengles_shader_get_uniform_location(const char * name)
+ {
+-    int id = -1;
+-    for(size_t i = 0; i < sizeof(shader_location) / sizeof(int); i++) {
+-        if(lv_strcmp(shader_names[i], name) == 0) {
+-            id = i;
+-        }
+-    }
+-
+-    LV_ASSERT_FORMAT_MSG(id > -1, "Uniform location doesn't exist for '%s'. Check `shader_location` array", name);
+-
+-    if(shader_location[id] != 0) {
++    int id = uniform_index(name);
++    if(id < 0) return -1;
++    if(shader_location_valid[id]) {
+         return shader_location[id];
+     }
+ 
+@@ -706,13 +778,15 @@ static int lv_opengles_shader_get_uniform_location(const char * name)
+         LV_LOG_WARN("Warning: uniform '%s' doesn't exist!", name);
+ 
+     shader_location[id] = location;
++    shader_location_valid[id] = true;
+     return location;
+ }
+ 
+ static void lv_opengles_shader_set_uniform1i(const char * name, int value)
+ {
+     LV_PROFILER_DRAW_BEGIN;
+-    GL_CALL(glUniform1i(lv_opengles_shader_get_uniform_location(name), value));
++    if(update_uniform(uniform_index(name), &value, sizeof(value)))
++        GL_CALL(glUniform1i(lv_opengles_shader_get_uniform_location(name), value));
+     LV_PROFILER_DRAW_END;
+ }
+ 
+@@ -723,21 +797,25 @@ static void lv_opengles_shader_set_uniformmatrix3fv(const char * name, int count
+      * GLES2.0 doesn't support transposing the matrix via glUniformMatrix3fv so this is the transposed matrix
+      * https://registry.khronos.org/OpenGL/specs/es/2.0/es_full_spec_2.0.pdf page 47
+      */
+-    GL_CALL(glUniformMatrix3fv(lv_opengles_shader_get_uniform_location(name), count, GL_FALSE, values));
++    if(count > 0 && update_uniform(uniform_index(name), values, (size_t)count * 9 * sizeof(float)))
++        GL_CALL(glUniformMatrix3fv(lv_opengles_shader_get_uniform_location(name), count, GL_FALSE, values));
+     LV_PROFILER_DRAW_END;
+ }
+ 
+ static void lv_opengles_shader_set_uniform1f(const char * name, float value)
+ {
+     LV_PROFILER_DRAW_BEGIN;
+-    GL_CALL(glUniform1f(lv_opengles_shader_get_uniform_location(name), value));
++    if(update_uniform(uniform_index(name), &value, sizeof(value)))
++        GL_CALL(glUniform1f(lv_opengles_shader_get_uniform_location(name), value));
+     LV_PROFILER_DRAW_END;
+ }
+ 
+ static void lv_opengles_shader_set_uniform3f(const char * name, float value_0, float value_1, float value_2)
+ {
+     LV_PROFILER_DRAW_BEGIN;
+-    GL_CALL(glUniform3f(lv_opengles_shader_get_uniform_location(name), value_0, value_1, value_2));
++    const float values[] = {value_0, value_1, value_2};
++    if(update_uniform(uniform_index(name), values, sizeof(values)))
++        GL_CALL(glUniform3f(lv_opengles_shader_get_uniform_location(name), value_0, value_1, value_2));
+     LV_PROFILER_DRAW_END;
+ }
+ 
+diff --git a/src/drivers/opengles/lv_opengles_driver.h b/src/drivers/opengles/lv_opengles_driver.h
+index 3e465af..29022a2 100644
+--- a/src/drivers/opengles/lv_opengles_driver.h
++++ b/src/drivers/opengles/lv_opengles_driver.h
+@@ -44,6 +44,10 @@ void lv_opengles_init(void);
+  */
+ void lv_opengles_deinit(void);
+ 
++/** Opt in to reusing unchanged shader uniforms and quad vertices on legacy GPUs.
++ * Call lv_opengles_reinit_state() after external GL modifies this driver's objects. */
++void lv_opengles_set_draw_cache(bool enabled);
++
+ /**
+  * Render a texture using alternate blending mode for smoother translucent materials and correct anti-aliasing of glTF elements when using transparent background
+  * @param texture        OpenGL texture ID
+diff --git a/src/drivers/opengles/lv_opengles_texture.c b/src/drivers/opengles/lv_opengles_texture.c
+index 95fc2a2..ab6503c 100644
+--- a/src/drivers/opengles/lv_opengles_texture.c
++++ b/src/drivers/opengles/lv_opengles_texture.c
+@@ -18,6 +18,7 @@
+ #include "lv_opengles_private.h"
+ #include "lv_opengles_texture_private.h"
+ #include "../../display/lv_display_private.h"
++#include "../../core/lv_obj.h"
+ 
+ #include <stdlib.h>
+ 
+@@ -116,10 +117,51 @@ lv_result_t lv_opengles_texture_reshape(lv_opengles_texture_t * texture, lv_disp
+         GL_CALL(glDeleteTextures(1, &texture->texture_id));
+     }
+     texture->texture_id = new_texture;
++    texture->render_width = width;
++    texture->render_height = height;
+     lv_opengles_texture_attach_to_display(texture, display);
+     return LV_RESULT_OK;
+ }
+ 
++lv_result_t lv_opengles_texture_set_render_size(lv_display_t * display, int32_t width, int32_t height)
++{
++#if LV_USE_DRAW_OPENGLES
++    if(!display || width <= 0 || height <= 0) return LV_RESULT_INVALID;
++    lv_opengles_texture_t * texture = lv_display_get_driver_data(display);
++    if(!texture) return LV_RESULT_INVALID;
++    if(texture->render_width == width && texture->render_height == height) return LV_RESULT_OK;
++    unsigned int new_texture = create_texture(width, height);
++    if(new_texture == GL_NONE) return LV_RESULT_INVALID;
++    if(texture->is_texture_owner && texture->texture_id != GL_NONE) {
++        GL_CALL(glDeleteTextures(1, &texture->texture_id));
++    }
++    texture->texture_id = new_texture;
++    texture->is_texture_owner = true;
++    texture->render_width = width;
++    texture->render_height = height;
++    lv_opengles_texture_attach_to_display(texture, display);
++    lv_obj_invalidate(lv_display_get_screen_active(display));
++    return LV_RESULT_OK;
++#else
++    LV_UNUSED(display);
++    LV_UNUSED(width);
++    LV_UNUSED(height);
++    return LV_RESULT_INVALID;
++#endif
++}
++
++void lv_opengles_texture_get_render_size(unsigned int texture_id, int32_t * width, int32_t * height)
++{
++    if(texture_id == GL_NONE) return;
++    lv_display_t * display = lv_opengles_texture_get_from_texture_id(texture_id);
++    if(!display) return;
++    lv_opengles_texture_t * texture = lv_display_get_driver_data(display);
++    if(texture && texture->render_width > 0 && texture->render_height > 0) {
++        *width = texture->render_width;
++        *height = texture->render_height;
++    }
++}
++
+ static void lv_opengles_texture_attach_to_display(lv_opengles_texture_t * texture, lv_display_t * display)
+ {
+     LV_ASSERT_NULL(display);
+@@ -200,6 +242,8 @@ static lv_display_t * lv_opengles_texture_create_common(int32_t w, int32_t h)
+         lv_display_delete(disp);
+         return NULL;
+     }
++    texture->render_width = w;
++    texture->render_height = h;
+     lv_result_t res = lv_opengles_texture_create_draw_buffers(texture, disp);
+     if(res != LV_RESULT_OK) {
+         LV_LOG_ERROR("Failed to create draw buffers");
+diff --git a/src/drivers/opengles/lv_opengles_texture_private.h b/src/drivers/opengles/lv_opengles_texture_private.h
+index 8a957a6..f1b123b 100644
+--- a/src/drivers/opengles/lv_opengles_texture_private.h
++++ b/src/drivers/opengles/lv_opengles_texture_private.h
+@@ -30,6 +30,8 @@ extern "C" {
+ 
+ typedef struct {
+     unsigned int texture_id;
++    int32_t render_width;
++    int32_t render_height;
+ #if !LV_USE_DRAW_OPENGLES
+     uint8_t * fb1;
+ #endif /*!LV_USE_DRAW_OPENGLES*/
+@@ -42,6 +44,10 @@ typedef struct {
+ 
+ lv_result_t lv_opengles_texture_reshape(lv_opengles_texture_t * texture, lv_display_t * display,
+                                         int32_t width, int32_t height);
++/* Change only raster resolution; layout, damage and input remain logical. */
++lv_result_t lv_opengles_texture_set_render_size(lv_display_t * display, int32_t width, int32_t height);
++/* Non-display layer textures retain the caller's logical dimensions. */
++void lv_opengles_texture_get_render_size(unsigned int texture_id, int32_t * width, int32_t * height);
+ void lv_opengles_texture_deinit(lv_opengles_texture_t * texture);
+ 
+ /**********************
+diff --git a/src/drivers/opengles/opengl_shader/lv_opengl_shader_manager.c b/src/drivers/opengles/opengl_shader/lv_opengl_shader_manager.c
+index f369d2e..c2d3c71 100644
+--- a/src/drivers/opengles/opengl_shader/lv_opengl_shader_manager.c
++++ b/src/drivers/opengles/opengl_shader/lv_opengl_shader_manager.c
+@@ -22,6 +22,7 @@
+ #include "../../../stdlib/lv_string.h"
+ 
+ #include <string.h>
++#include <android/log.h>
+ 
+ /*********************
+  *      DEFINES
+@@ -84,20 +85,27 @@ void lv_opengl_shader_manager_init(lv_opengl_shader_manager_t * manager, const l
+                                    size_t len, const char * vert_src,
+                                    const char * frag_src)
+ {
+-
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                        "LVGL GL: creating source map");
+     manager->sources_map = create_shader_map(sources, len);
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                        "LVGL GL: source map ready");
+     if(vert_src != NULL) {
+         lv_opengl_shader_source_t entry = { { "__MAIN__.vert", lv_strdup(vert_src) }, 1 };
+         lv_rb_node_t * node = lv_rb_insert(&manager->sources_map, &entry);
+         LV_ASSERT_MSG(node,
+                       "Failed to insert shader source to source map");
+         lv_memcpy(node->data, &entry, sizeof(entry));
++        __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                            "LVGL GL: main vertex stored");
+     }
+     if(frag_src != NULL) {
+         lv_opengl_shader_source_t entry = { { "__MAIN__.frag", lv_strdup(frag_src) }, 1 };
+         lv_rb_node_t * node = lv_rb_insert(&manager->sources_map, &entry);
+         LV_ASSERT_MSG(node, "Failed to insert shader to shader map");
+         lv_memcpy(node->data, &entry, sizeof(entry));
++        __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                            "LVGL GL: main fragment stored");
+     }
+ 
+     lv_rb_init(&manager->compiled_shaders_map,
+@@ -214,6 +222,10 @@ lv_result_t lv_opengl_shader_manager_select_shader(lv_opengl_shader_manager_t *
+     if(!is_shader_compiled(shader_map_key.id)) {
+         GLchar info_log[512];
+         GL_CALL(glGetShaderInfoLog(shader_map_key.id, sizeof(info_log), NULL, info_log));
++        __android_log_print(ANDROID_LOG_ERROR, "AeraGpu",
++                            "GLSL %s shader %s failed: %s",
++                            lv_opengles_glsl_version_to_string(glsl_version),
++                            shader_identifier, info_log);
+         LV_LOG_WARN("Failed to compile shader for glsl version '%s': %s", lv_opengles_glsl_version_to_string(glsl_version),
+                     info_log);
+         GL_CALL(glDeleteShader(shader_map_key.id));
+@@ -272,6 +284,8 @@ lv_opengl_shader_manager_get_program(lv_opengl_shader_manager_t * manager,
+         GLchar info_log[512];
+         GL_CALL(glGetProgramInfoLog(program_id, sizeof(info_log), NULL,
+                                     info_log));
++        __android_log_print(ANDROID_LOG_ERROR, "AeraGpu",
++                            "GLSL program link failed: %s", info_log);
+         LV_LOG_WARN("Failed to link program: %s", info_log);
+         GL_CALL(glDeleteProgram(program_id));
+         return NULL;
+@@ -505,6 +519,9 @@ static bool is_program_linked(GLint program_id)
+ static GLuint compile_shader(const char * shader_source, bool is_vertex_shader)
+ {
+     GLuint shader_id;
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                        "LVGL GL: create %s shader",
++                        is_vertex_shader ? "vertex" : "fragment");
+     if(is_vertex_shader) {
+         GL_CALL(shader_id = glCreateShader(GL_VERTEX_SHADER));
+     }
+@@ -512,9 +529,18 @@ static GLuint compile_shader(const char * shader_source, bool is_vertex_shader)
+         GL_CALL(shader_id = glCreateShader(GL_FRAGMENT_SHADER));
+     }
+ 
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                        "LVGL GL: set %s shader source id=%u",
++                        is_vertex_shader ? "vertex" : "fragment", shader_id);
+     GL_CALL(glShaderSource(shader_id, 1, (const char **)&shader_source,
+                            NULL));
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                        "LVGL GL: compile %s shader id=%u",
++                        is_vertex_shader ? "vertex" : "fragment", shader_id);
+     GL_CALL(glCompileShader(shader_id));
++    __android_log_print(ANDROID_LOG_INFO, "AeraGpu",
++                        "LVGL GL: compiled %s shader id=%u",
++                        is_vertex_shader ? "vertex" : "fragment", shader_id);
+ 
+     return shader_id;
+ }

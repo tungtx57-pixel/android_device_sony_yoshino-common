@@ -9,3 +9,11 @@ LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)
 LOCAL_SRC_FILES := init.recovery.usb.rc
 include $(BUILD_PREBUILT)
 endif
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := init.recovery.wifi.rc
+LOCAL_MODULE_TAGS := optional
+LOCAL_MODULE_CLASS := ETC
+LOCAL_MODULE_PATH := $(TARGET_RECOVERY_ROOT_OUT)
+LOCAL_SRC_FILES := init.recovery.wifi.rc
+include $(BUILD_PREBUILT)
