@@ -147,6 +147,20 @@ for d in data iar_db hlos_rfs rfs wlan; do
     fi
 done
 
+# Force-replace RFS symlinks in case the device tree ramdisk pre-populated
+# /vendor/rfs/msm/mpss/readonly/firmware -> /firmware/image (init's builtin
+# symlink command does not overwrite existing symlinks).
+mkdir -p /vendor/rfs/msm/mpss/readonly/vendor /tmp/rfs-ramdumps/modem
+rm -rf /vendor/rfs/msm/mpss/readonly/firmware /vendor/rfs/msm/mpss/readonly/vendor/firmware \\
+       /vendor/rfs/msm/mpss/hlos /vendor/rfs/msm/mpss/ramdumps \\
+       /vendor/rfs/msm/mpss/readwrite /vendor/rfs/msm/mpss/shared
+ln -sfn /vendor/firmware_mnt /vendor/rfs/msm/mpss/readonly/firmware
+ln -sfn /vendor/firmware /vendor/rfs/msm/mpss/readonly/vendor/firmware
+ln -sfn /mnt/vendor/persist/hlos_rfs/shared /vendor/rfs/msm/mpss/hlos
+ln -sfn /tmp/rfs-ramdumps/modem /vendor/rfs/msm/mpss/ramdumps
+ln -sfn /mnt/vendor/persist/rfs/msm/mpss /vendor/rfs/msm/mpss/readwrite
+ln -sfn /mnt/vendor/persist/rfs/shared /vendor/rfs/msm/mpss/shared
+
 if ! grep -q " /dsp " /proc/mounts 2>/dev/null; then
     mount -t ext4 -o ro,nosuid,nodev /dev/block/bootdevice/by-name/dsp /dsp 2>/dev/null || true
 fi
@@ -264,6 +278,8 @@ chmod 0755 /vendor /vendor/bin /vendor/etc /vendor/etc/wifi /vendor/firmware /ve
 WLAN_ON='printf '"'"'ON\\000'"'"' > /dev/wlan 2>/dev/null || true'
 printf '%s\\n' \\
     '#!/system/bin/sh' \\
+    'ln -sfn /vendor/firmware_mnt /vendor/rfs/msm/mpss/readonly/firmware' \\
+    'ln -sfn /vendor/firmware /vendor/rfs/msm/mpss/readonly/vendor/firmware' \\
     'until [ "$(getprop vendor.peripheral.modem.state)" = "ONLINE" ]; do sleep 1; done' \\
     'sleep 2' \\
     "$WLAN_ON" \\
