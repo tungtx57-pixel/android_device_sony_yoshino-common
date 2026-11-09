@@ -231,3 +231,10 @@ AERA_SKIP_DECRYPTED_ADOPTED_STORAGE := true
 OF_SKIP_DECRYPTED_ADOPTED_STORAGE := true
 AERA_NO_TREBLE_COMPATIBILITY_CHECK := 1
 OF_NO_TREBLE_COMPATIBILITY_CHECK := 1
+
+### RAMDISK COMPRESSION (SONY XBOOT 36 MIB INITRD BUDGET)
+# Compresses runtime files with XZ into an internal archive, unpacking on early-init.
+# Keeps the outer compressed ramdisk under ~22 MiB, safely below Sony XBoot 36 MiB limit.
+AERA_USE_EXTREME_COMPRESSION := 1
+OF_USE_EXTREME_COMPRESSION := 1
+TW_USE_EXTREME_COMPRESSION := 1

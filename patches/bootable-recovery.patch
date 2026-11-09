@@ -2369,7 +2369,7 @@ index 499e0ea..b2a4f1c 100644
  }
  
  static void set_displayed_framebuffer(unsigned n)
-@@ -274,15 +390,19 @@
+@@ -274,15 +390,20 @@
  
      printf("framebuffer: %d (%d x %d)\n", fb_fd, gr_draw->width, gr_draw->height);
  
@@ -2516,19 +2516,17 @@ diff --git a/partitionmanager.cpp b/partitionmanager.cpp
 index d04b64a..ddc0d00 100755
 --- a/partitionmanager.cpp
 +++ b/partitionmanager.cpp
-@@ -4687,12 +4687,10 @@ bool TWPartitionManager::Decrypt_Adopted()
+@@ -4687,12 +4687,10 @@
  #ifdef TW_INCLUDE_CRYPTO
  
    int SDK = TWFunc::Get_Android_SDK_Version();
 -  #if defined(OF_SKIP_DECRYPTED_ADOPTED_STORAGE)
 -    if (SDK > 30) {
--  	   LOGINFO("Decrypt_Adopted: skipping adopted storage decryption on Android 12+\n");
--  	   return false;
++  if (SDK > 30) {
+   	   LOGINFO("Decrypt_Adopted: skipping adopted storage decryption on Android 12+\n");
+   	   return false;
 -     }
 -  #endif
-+  if (SDK > 30) {
-+	LOGINFO("Decrypt_Adopted: skipping adopted storage decryption on Android 12+\n");
-+	return false;
 +  }
  
    bool ret = false;

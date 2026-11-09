@@ -54,8 +54,13 @@ apply_git_patch() {
 	if git -C "${repo_dir}" apply --check "${patch_file}" >/dev/null 2>&1; then
 		git -C "${repo_dir}" apply "${patch_file}"
 		echo "[yoshino-patches] Applied: ${rel_path} (${2})"
+	elif git -C "${repo_dir}" apply --ignore-whitespace --check "${patch_file}" >/dev/null 2>&1; then
+		git -C "${repo_dir}" apply --ignore-whitespace "${patch_file}"
+		echo "[yoshino-patches] Applied (ignore-whitespace): ${rel_path} (${2})"
 	elif git -C "${repo_dir}" apply --3way "${patch_file}" >/dev/null 2>&1; then
 		echo "[yoshino-patches] Applied (3-way): ${rel_path} (${2})"
+	elif patch -d "${repo_dir}" -p1 -N -r - --no-backup-if-mismatch < "${patch_file}" >/dev/null 2>&1; then
+		echo "[yoshino-patches] Applied (patch fallback): ${rel_path} (${2})"
 	else
 		echo "[yoshino-patches] Warning: could not cleanly apply ${2} to ${rel_path}; continuing"
 	fi
@@ -463,6 +468,17 @@ if os.path.isdir(sony_root):
                 with open(flags_path, "w", encoding="utf-8") as f:
                     f.write(flags)
                 print(f"[yoshino-patches] Removed non-A/B slotselect in {os.path.relpath(flags_path, tree_root)}")
+
+        # 3i. Ensure AERA_USE_EXTREME_COMPRESSION := 1 is declared in BoardConfig.mk
+        bc_path = os.path.join(dev_dir, "BoardConfig.mk")
+        if os.path.isfile(bc_path):
+            with open(bc_path, "r", encoding="utf-8") as f:
+                bc = f.read()
+            if "AERA_USE_EXTREME_COMPRESSION" not in bc:
+                bc += "\n### RAMDISK EXTREME COMPRESSION\nAERA_USE_EXTREME_COMPRESSION := 1\nOF_USE_EXTREME_COMPRESSION := 1\nTW_USE_EXTREME_COMPRESSION := 1\n"
+                with open(bc_path, "w", encoding="utf-8") as f:
+                    f.write(bc)
+                print(f"[yoshino-patches] Added AERA_USE_EXTREME_COMPRESSION := 1 to {os.path.relpath(bc_path, tree_root)}")
 PYEOF
 
 # 4. Optimize copyAeraFonts in bootable/recovery/aeraui/build/aeraui_defaults.go for 64 MiB recovery partitions / 36 MiB XBoot initrd ceiling
