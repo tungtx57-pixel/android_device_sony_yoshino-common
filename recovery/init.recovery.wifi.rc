@@ -186,14 +186,14 @@ service aera-cnss-daemon /vendor/bin/cnss-daemon -n -l
     capabilities NET_ADMIN
     seclabel u:r:recovery:s0
 
-service aera-wlan-driver /system/bin/sh -c "until [ \"$(getprop vendor.peripheral.modem.state)\" = \"ONLINE\" ]; do sleep 1; done; sleep 2; printf 'ON\\000' > /dev/wlan 2>/dev/null || true; until [ -e /sys/class/net/wlan0 ]; do sleep 1; printf 'ON\\000' > /dev/wlan 2>/dev/null || true; done; setprop wifi.driver.ready true"
+service aera-wlan-driver /system/bin/sh /vendor/bin/aera-wlan-driver.sh
     disabled
     oneshot
     user root
     group root wifi
     seclabel u:r:recovery:s0
 
-service wpa_supplicant /system/bin/sh -c "mkdir -p /tmp/recovery/sockets; chmod 0777 /tmp/recovery /tmp/recovery/sockets; until [ -e /sys/class/net/wlan0 ]; do printf 'ON\\000' > /dev/wlan 2>/dev/null || true; sleep 0.5; done; exec /system/bin/wpa_supplicant -Dnl80211 -iwlan0 -dd -O/tmp/recovery/sockets -c/vendor/etc/wifi/wpa_supplicant.conf"
+service wpa_supplicant /system/bin/sh /vendor/bin/aera-wpa.sh
     disabled
     user root
     group root wifi inet net_admin

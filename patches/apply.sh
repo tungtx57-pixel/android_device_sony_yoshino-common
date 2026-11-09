@@ -251,6 +251,34 @@ fi
 chmod 0644 /vendor/etc/wifi/wpa_supplicant.conf 2>/dev/null || true
 chmod 0755 /vendor /vendor/bin /vendor/etc /vendor/etc/wifi /vendor/firmware /vendor/firmware/wlan /vendor/firmware/wlan/qca_cld /vendor/lib64 /vendor/lib64/egl /vendor/lib64/hw 2>/dev/null || true
 
+# WLAN helper scripts. Android 16 init drops service sections whose inline
+# `sh -c` strings contain escaped quotes, $(...) or backslash sequences, so the
+# bring-up logic lives in plain scripts invoked by init.recovery.wifi.rc.
+# Written with printf (no heredoc): heredocs need a writable /tmp, which is not
+# available yet during `on fs`.
+WLAN_ON='printf '"'"'ON\\000'"'"' > /dev/wlan 2>/dev/null || true'
+printf '%s\\n' \\
+    '#!/system/bin/sh' \\
+    'until [ "$(getprop vendor.peripheral.modem.state)" = "ONLINE" ]; do sleep 1; done' \\
+    'sleep 2' \\
+    "$WLAN_ON" \\
+    'until [ -e /sys/class/net/wlan0 ]; do' \\
+    '    sleep 1' \\
+    "    $WLAN_ON" \\
+    'done' \\
+    'setprop wifi.driver.ready true' > /vendor/bin/aera-wlan-driver.sh
+
+printf '%s\\n' \\
+    '#!/system/bin/sh' \\
+    'mkdir -p /tmp/recovery/sockets' \\
+    'chmod 0777 /tmp/recovery /tmp/recovery/sockets' \\
+    'until [ -e /sys/class/net/wlan0 ]; do' \\
+    "    $WLAN_ON" \\
+    '    sleep 0.5' \\
+    'done' \\
+    'exec /system/bin/wpa_supplicant -Dnl80211 -iwlan0 -O/tmp/recovery/sockets -c/vendor/etc/wifi/wpa_supplicant.conf' > /vendor/bin/aera-wpa.sh
+chmod 0755 /vendor/bin/aera-wlan-driver.sh /vendor/bin/aera-wpa.sh
+
 exit 0
 """
 
@@ -493,5 +521,50 @@ if "debug.SetMemoryLimit" not in content:
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     print("[yoshino-patches] Injected 11 GiB memory limit and GOGC=40 into soong_build/main.go")
+PYEOF
+fi
+
+# 6. Browser/Telegram jail: the Yoshino 4.4 kernel has no UTS namespace
+#    (CONFIG_UTS_NS unset; /proc/self/ns only lists cgroup, mnt, net), so
+#    unshare(CLONE_NEWUTS) returns EINVAL and every jailed app dies at launch.
+#    Request the UTS namespace and private hostname only when the kernel has it;
+#    chroot, mount namespace, UID drop, rlimits and seccomp stay in force.
+JAIL_MAIN="${TREE_ROOT}/bootable/recovery/aeraui/features/browser/jail_main.cpp"
+if [ -f "${JAIL_MAIN}" ]; then
+	python3 - "${JAIL_MAIN}" << 'PYEOF'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path, "r", encoding="utf-8") as f:
+    content = f.read()
+
+marker = "const bool has_uts_ns"
+if marker not in content:
+    pattern = re.compile(
+        r"(?P<indent>[ \t]*)minijail_namespace_uts\(jail\);\n"
+        r"(?P<comment>(?:[ \t]*//[^\n]*\n)*)"
+        r"(?P<call>[ \t]*Check\(minijail_namespace_set_hostname\(jail,.*?\"private hostname\"\);\n)",
+        re.S,
+    )
+    match = pattern.search(content)
+    if not match:
+        sys.exit("[yoshino-patches] jail_main.cpp: UTS namespace block not found")
+    indent = match.group("indent")
+    call = "".join("  " + line if line.strip() else line
+                   for line in match.group("call").splitlines(True))
+    replacement = (
+        f"{indent}// Linux 4.4 vendor kernels (e.g. Sony Yoshino) may lack CONFIG_UTS_NS.\n"
+        f"{indent}const bool has_uts_ns = access(\"/proc/self/ns/uts\", F_OK) == 0;\n"
+        f"{indent}if (has_uts_ns) minijail_namespace_uts(jail);\n"
+        f"{match.group('comment')}"
+        f"{indent}if (has_uts_ns) {{\n"
+        f"{call}"
+        f"{indent}}}\n"
+    )
+    content = content[:match.start()] + replacement + content[match.end():]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    print("[yoshino-patches] Made browser jail UTS namespace optional for Linux 4.4")
 PYEOF
 fi
