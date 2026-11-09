@@ -2164,7 +2164,7 @@ index a6c76e9..2c083ba 100644
  minui_backend* open_overlay();
  
 diff --git a/minuitwrp/graphics_fbdev.cpp b/minuitwrp/graphics_fbdev.cpp
-index 499e0ea..f0f2fe3 100644
+index 499e0ea..b2a4f1c 100644
 --- a/minuitwrp/graphics_fbdev.cpp
 +++ b/minuitwrp/graphics_fbdev.cpp
 @@ -21,6 +21,10 @@
@@ -2178,7 +2178,7 @@ index 499e0ea..f0f2fe3 100644
  
  #include <sys/cdefs.h>
  #include <sys/ioctl.h>
-@@ -48,6 +52,139 @@ static fb_var_screeninfo vi;
+@@ -48,6 +52,139 @@
  static int fb_fd = -1;
  static __u32 smem_len;
  
@@ -2318,19 +2318,67 @@ index 499e0ea..f0f2fe3 100644
  static minui_backend my_backend = {
      .init = fbdev_init,
      .flip = fbdev_flip,
-@@ -59,6 +196,11 @@ minui_backend* open_fbdev() {
+@@ -59,39 +196,18 @@
      return &my_backend;
  }
  
+-static void fbdev_blank(minui_backend* backend __unused, bool blank)
+-{
+-#if defined(TW_NO_SCREEN_BLANK) && defined(TW_BRIGHTNESS_PATH) && defined(TW_MAX_BRIGHTNESS)
+-    int fd;
+-    char brightness[4];
+-    snprintf(brightness, 4, "%03d", TW_MAX_BRIGHTNESS/2);
+-
+-    fd = open(TW_BRIGHTNESS_PATH, O_RDWR);
+-    if (fd < 0) {
+-        perror("cannot open LCD backlight");
+-        return;
+-    }
+-    write(fd, blank ? "000" : brightness, 3);
+-    close(fd);
+-
+-#ifdef TW_SECONDARY_BRIGHTNESS_PATH
+-    fd = open(TW_SECONDARY_BRIGHTNESS_PATH, O_RDWR);
+-    if (fd < 0) {
+-        perror("cannot open LCD backlight 2");
+-        return;
+-    }
+-    write(fd, blank ? "000" : brightness, 3);
+-    close(fd);
+-#endif
+-#else
+-#ifndef TW_NO_SCREEN_BLANK
+-    int ret;
 +int fbdev_dup_fd() {
 +    fbdev_wait_present();
 +    return fb_fd < 0 ? -1 : fcntl(fb_fd, F_DUPFD_CLOEXEC, 0);
 +}
-+
- static void fbdev_blank(minui_backend* backend __unused, bool blank)
- {
- #if defined(TW_NO_SCREEN_BLANK) && defined(TW_BRIGHTNESS_PATH) && defined(TW_MAX_BRIGHTNESS)
-@@ -283,6 +425,12 @@ static GRSurface* fbdev_init(minui_backend* backend) {
+ 
+-    ret = ioctl(fb_fd, FBIOBLANK, blank ? FB_BLANK_POWERDOWN : FB_BLANK_UNBLANK);
+-    if (ret < 0)
+-        perror("ioctl(): blank");
+-#endif
+-#endif
++static void fbdev_blank(minui_backend* backend __unused, bool blank __unused)
++{
++    // On legacy MDSS DSI + Synaptics ClearPad/Incell panels (Sony Yoshino),
++    // FBIOBLANK(FB_BLANK_POWERDOWN / FB_BLANK_UNBLANK) triggers an AB-BA kernel
++    // deadlock between mdss_dsi_panel_driver_power_on_ctrl -> cancel_work_sync()
++    // and clearpad incell_panel_power_worker. Backlight blank/unblank is managed
++    // directly via /sys/class/leds/wled/brightness by AeraScreenTimer.
+ }
+ 
+ static void set_displayed_framebuffer(unsigned n)
+@@ -274,15 +390,18 @@
+ 
+     printf("framebuffer: %d (%d x %d)\n", fb_fd, gr_draw->width, gr_draw->height);
+ 
+-    fbdev_blank(backend, true);
+-    fbdev_blank(backend, false);
+-
+     smem_len = fi.smem_len;
+ 
+     return gr_draw;
  }
  
  static GRSurface* fbdev_flip(minui_backend* backend __unused) {
@@ -2343,7 +2391,7 @@ index 499e0ea..f0f2fe3 100644
  #if defined(RECOVERY_BGRA)
      // In case of BGRA, do some byte swapping
      unsigned char* ucfb_vaddr = (unsigned char*)gr_draw->data;
-@@ -297,16 +445,33 @@ static GRSurface* fbdev_flip(minui_backend* backend __unused) {
+@@ -297,16 +416,33 @@
          // Copy from the in-memory surface to the framebuffer.
          memcpy(gr_framebuffer[1-displayed_buffer].data, gr_draw->data,
                 gr_draw->height * gr_draw->row_bytes);

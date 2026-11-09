@@ -32,7 +32,7 @@ Common platform configuration (`msm8998` / Snapdragon 835) for Sony Xperia Yoshi
 
 4. **Adreno 540 Legacy KGSL GPU, MSM8998 Wi-Fi & 16:9 UI Configuration ([`BoardConfigPlatform.mk`](BoardConfigPlatform.mk), [`recovery/root/init.recovery.wifi.rc`](recovery/root/init.recovery.wifi.rc), [`patches/bootable-recovery.patch`](patches/bootable-recovery.patch), [`patches/lvgl.patch`](patches/lvgl.patch))**:
    - Enables `AERA_UI_LEGACY_KGSL_GPU := true` (`gralloc.msm8998.so` + Adreno 540 `libEGL_adreno.so` / `libGLESv2_adreno.so` zero-copy `EGLImage` / `glBlitFramebuffer` renderer on legacy MDSS `fbdev` with automatic software fallback) and `OF_ENABLE_WLAN := 1` (`wpa_supplicant`, `wpa_cli`, `dhcptool`, `aera-netfs`, `ttyd`, `aera-browser-jail`, and `init.recovery.wifi.rc` / `aera-vendor-setup.sh`).
-   - Fixes a fatal `SIGABRT` on Frame 1 in `res_scale_surface()` (`minuitwrp/resources.cpp`) and guards `gpt_disk_get_disk_info()` (`gpt/gpt.c:253`) against null buffers.
+   - Fixes a fatal `SIGABRT` on Frame 1 in `res_scale_surface()` (`minuitwrp/resources.cpp`), prevents the Sony Yoshino MDSS DSI + Synaptics ClearPad `incell_panel_power_worker` <-> `cancel_work_sync()` AB-BA kernel deadlock on `FBIOBLANK` in `minuitwrp/graphics_fbdev.cpp` (`AERA_NO_SCREEN_BLANK := true`), and guards `gpt_disk_get_disk_info()` (`gpt/gpt.c:253`) against null buffers.
    - Adapts AERA UI scenes (`Menu`, `Decrypt`, `Terminal`, `Format Data`, `Operation`, `Reboot`, `About`, `Files`) and dynamic `cpufreq/policy*` boost for 16:9 MSM8998 panels.
 
 ---
