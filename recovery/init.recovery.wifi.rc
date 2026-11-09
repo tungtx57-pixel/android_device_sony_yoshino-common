@@ -5,7 +5,7 @@
 # daemons on /dev/block/bootdevice/by-name/oem. We mount oem read-only at
 # /mnt/vendor_gpu during `on fs` via /system/bin/aera-vendor-setup.sh so recovery
 # keeps its own /vendor ramdisk while consuming the installed ROM's Adreno 540
-# EGL/GLES/Gralloc stack and Qualcomm WLAN transport services.
+# EGL/GLES/Gralloc stack and Qualcomm/Sony modem + WLAN transport services.
 
 on init
     mkdir /mnt/vendor_gpu 0755 root root
@@ -14,31 +14,49 @@ on init
 on fs
     wait /dev/block/platform/soc/1da4000.ufshc
     symlink /dev/block/platform/soc/1da4000.ufshc /dev/block/bootdevice
+    chmod 0660 /dev/qseecom
+    chown system drmrpc /dev/qseecom
+    chmod 0664 /dev/ion
+    chown system system /dev/ion
+    chmod 0666 /sys/power/wake_lock
+    chmod 0666 /sys/power/wake_unlock
     exec u:r:recovery:s0 root root -- /system/bin/sh /system/bin/aera-vendor-setup.sh
 
     # Restart ueventd after mounting firmware partitions (/firmware, /mnt/vendor_gpu)
-    # so its mount namespace can service GPU and modem/WLAN firmware requests.
+    # so its mount namespace can service GPU, IPA, and modem/WLAN firmware requests.
     stop ueventd
     exec u:r:recovery:s0 root root -- /system/bin/sleep 1
     start ueventd
     exec u:r:recovery:s0 root root -- /system/bin/sleep 1
 
+    # Ensure qseecomd is running even on unencrypted devices so TZ PIL and
+    # Sony sct_service can authenticate IPA and modem firmware segments.
+    start qseecomd
+
     # Load IPC Router security config before bringing up the modem/WLAN stack.
     start aera-irsc-util
 
+on property:vendor.sys.listeners.registered=true
+    write /dev/ipa 1
+
+on property:twrp.all.users.decrypted=true
+    start qseecomd
+
 on property:init.svc.aera-irsc-util=stopped
-    mkdir /data/vendor 0771 root root
-    mount tmpfs tmpfs /data/vendor mode=0771,uid=0,gid=0
-    mkdir /tmp/rfs-ramdumps 0770 root system
-    mkdir /tmp/rfs-ramdumps/modem 0770 root system
-    mkdir /data/vendor/tombstones 0770 root system
-    mkdir /data/vendor/tombstones/rfs 0770 root system
-    mkdir /data/vendor/tombstones/rfs/modem 0770 root system
-    mkdir /data/vendor/tombstones/rfs/lpass 0770 root system
-    mkdir /data/vendor/tombstones/rfs/tn 0770 root system
-    mkdir /data/vendor/tombstones/rfs/slpi 0770 root system
-    mkdir /data/vendor/tombstones/rfs/cdsp 0770 root system
-    mkdir /data/vendor/tombstones/rfs/wpss 0770 root system
+    mkdir /data/vendor 0771 root system
+    mount tmpfs tmpfs /data/vendor mode=0771,uid=0,gid=1000
+    mkdir /data/vendor/wifi 0770 wifi wifi
+    mkdir /data/vendor/pddump 0770 oem_2903 oem_2903
+    mkdir /tmp/rfs-ramdumps 0770 oem_2903 oem_2903
+    mkdir /tmp/rfs-ramdumps/modem 0770 oem_2903 oem_2903
+    mkdir /data/vendor/tombstones 0771 system system
+    mkdir /data/vendor/tombstones/rfs 0770 oem_2903 oem_2903
+    mkdir /data/vendor/tombstones/rfs/modem 0770 oem_2903 oem_2903
+    mkdir /data/vendor/tombstones/rfs/lpass 0770 oem_2903 oem_2903
+    mkdir /data/vendor/tombstones/rfs/tn 0770 oem_2903 oem_2903
+    mkdir /data/vendor/tombstones/rfs/slpi 0770 oem_2903 oem_2903
+    mkdir /data/vendor/tombstones/rfs/cdsp 0770 oem_2903 oem_2903
+    mkdir /data/vendor/tombstones/rfs/wpss 0770 oem_2903 oem_2903
     mkdir /vendor/rfs 0755 root root
     mkdir /vendor/rfs/msm 0755 root root
     mkdir /vendor/rfs/msm/mpss 0755 root root
@@ -51,55 +69,71 @@ on property:init.svc.aera-irsc-util=stopped
     symlink /mnt/vendor/persist/rfs/msm/mpss /vendor/rfs/msm/mpss/readwrite
     symlink /mnt/vendor/persist/rfs/shared /vendor/rfs/msm/mpss/shared
 
+    chown oem_2997 oem_2997 /dev/block/sda1
+    chmod 0770 /dev/block/sda1
     chown system system /dev/subsys_modem
     chmod 0640 /dev/subsys_modem
     chown wifi wifi /dev/wlan
     chmod 0660 /dev/wlan
+    chmod 0666 /sys/power/wake_lock
+    chmod 0666 /sys/power/wake_unlock
 
+    start aera-tad
     start aera-rmt-storage
     start aera-qrtr-ns
     start aera-pd-mapper
     start aera-tftp-server
+    start aera-sct
+    start aera-mlog-qmi
+    start aera-ta-qmi
     start aera-peripheral-manager
-
-on property:sys.aera.wlan.up=1
-    setprop sys.aera.wlan.up 0
-    start aera-cnss-daemon
-    start aera-wlan-driver
-    start wpa_supplicant
 
 on property:init.svc.aera-peripheral-manager=running
     start aera-peripheral-proxy
 
 on property:vendor.peripheral.modem.state=ONLINE
+    write /dev/ipa 1
     start aera-cnss-daemon
     start aera-wlan-driver
+
+on property:sys.aera.wlan.up=1
+    setprop sys.aera.wlan.up 0
+    start aera-wlan-driver
+    start wpa_supplicant
 
 on property:wifi.driver.ready=true
     mkdir /tmp/recovery 0777 root root
     mkdir /tmp/recovery/sockets 0777 root root
     start wpa_supplicant
 
-service aera-irsc-util /system/bin/sh -c "if [ -x /mnt/vendor_gpu/bin/irsc_util ]; then /mnt/vendor_gpu/bin/irsc_util /mnt/vendor_gpu/etc/sec_config; fi"
+service aera-irsc-util /system/bin/sh -c "if [ -x /vendor/bin/irsc_util ]; then /vendor/bin/irsc_util /vendor/etc/sec_config; fi"
     disabled
     oneshot
     user root
     setenv LD_LIBRARY_PATH /mnt/vendor_gpu/lib64:/system/lib64:/vendor/lib64
     seclabel u:r:recovery:s0
 
-service aera-rmt-storage /mnt/vendor_gpu/bin/rmt_storage
+service aera-tad /vendor/bin/tad /dev/block/bootdevice/by-name/TA 0,16
+    disabled
+    user oem_2997
+    group oem_2997 root
+    socket tad stream 0660 system oem_2993
+    setenv LD_LIBRARY_PATH /mnt/vendor_gpu/lib64:/system/lib64:/vendor/lib64
+    seclabel u:r:recovery:s0
+
+service aera-rmt-storage /vendor/bin/rmt_storage
     disabled
     user root
     setenv LD_LIBRARY_PATH /mnt/vendor_gpu/lib64:/system/lib64:/vendor/lib64
     seclabel u:r:recovery:s0
 
-service aera-pd-mapper /mnt/vendor_gpu/bin/pd-mapper
+service aera-pd-mapper /vendor/bin/pd-mapper
     disabled
     user root
     setenv LD_LIBRARY_PATH /mnt/vendor_gpu/lib64:/system/lib64:/vendor/lib64
     seclabel u:r:recovery:s0
 
-service aera-peripheral-manager /mnt/vendor_gpu/bin/pm-service
+service aera-peripheral-manager /vendor/bin/pm-service
     disabled
     user system
     group system
@@ -107,13 +141,13 @@ service aera-peripheral-manager /mnt/vendor_gpu/bin/pm-service
     ioprio rt 4
     seclabel u:r:recovery:s0
 
-service aera-peripheral-proxy /mnt/vendor_gpu/bin/pm-proxy
+service aera-peripheral-proxy /vendor/bin/pm-proxy
     disabled
     user system
     group system
     seclabel u:r:recovery:s0
 
-service aera-qrtr-ns /mnt/vendor_gpu/bin/qrtr-ns -f
+service aera-qrtr-ns /vendor/bin/qrtr-ns -f
     disabled
     user oem_2906
     group oem_2906
@@ -121,27 +155,45 @@ service aera-qrtr-ns /mnt/vendor_gpu/bin/qrtr-ns -f
     setenv LD_LIBRARY_PATH /mnt/vendor_gpu/lib64:/system/lib64:/vendor/lib64
     seclabel u:r:recovery:s0
 
-service aera-tftp-server /mnt/vendor_gpu/bin/tftp_server
+service aera-tftp-server /vendor/bin/tftp_server
     disabled
     user root
     setenv LD_LIBRARY_PATH /mnt/vendor_gpu/lib64:/system/lib64:/vendor/lib64
     seclabel u:r:recovery:s0
 
-service aera-cnss-daemon /mnt/vendor_gpu/bin/cnss-daemon -n -l
+service aera-sct /vendor/bin/sct_service
+    disabled
+    user root
+    setenv LD_LIBRARY_PATH /mnt/vendor_gpu/lib64:/system/lib64:/vendor/lib64
+    seclabel u:r:recovery:s0
+
+service aera-mlog-qmi /vendor/bin/mlog_qmi_service
+    disabled
+    user root
+    setenv LD_LIBRARY_PATH /mnt/vendor_gpu/lib64:/system/lib64:/vendor/lib64
+    seclabel u:r:recovery:s0
+
+service aera-ta-qmi /vendor/bin/ta_qmi_service
+    disabled
+    user root
+    setenv LD_LIBRARY_PATH /mnt/vendor_gpu/lib64:/system/lib64:/vendor/lib64
+    seclabel u:r:recovery:s0
+
+service aera-cnss-daemon /vendor/bin/cnss-daemon -n -l
     disabled
     user system
     group system inet net_admin wifi
     capabilities NET_ADMIN
     seclabel u:r:recovery:s0
 
-service aera-wlan-driver /system/bin/sh -c "printf 'ON\\000' > /dev/wlan; until test -e /sys/class/net/wlan0; do sleep 1; done; setprop wifi.driver.ready true"
+service aera-wlan-driver /system/bin/sh -c "until [ \"$(getprop vendor.peripheral.modem.state)\" = \"ONLINE\" ]; do sleep 1; done; sleep 2; printf 'ON\\000' > /dev/wlan 2>/dev/null || true; until [ -e /sys/class/net/wlan0 ]; do sleep 1; printf 'ON\\000' > /dev/wlan 2>/dev/null || true; done; setprop wifi.driver.ready true"
     disabled
     oneshot
     user root
     group root wifi
     seclabel u:r:recovery:s0
 
-service wpa_supplicant /system/bin/wpa_supplicant -Dnl80211 -iwlan0 -dd -O/tmp/recovery/sockets -c/vendor/etc/wifi/wpa_supplicant.conf
+service wpa_supplicant /system/bin/sh -c "mkdir -p /tmp/recovery/sockets; chmod 0777 /tmp/recovery /tmp/recovery/sockets; until [ -e /sys/class/net/wlan0 ]; do printf 'ON\\000' > /dev/wlan 2>/dev/null || true; sleep 0.5; done; exec /system/bin/wpa_supplicant -Dnl80211 -iwlan0 -dd -O/tmp/recovery/sockets -c/vendor/etc/wifi/wpa_supplicant.conf"
     disabled
     user root
     group root wifi inet net_admin

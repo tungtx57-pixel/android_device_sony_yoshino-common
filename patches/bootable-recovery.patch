@@ -2369,13 +2369,14 @@ index 499e0ea..b2a4f1c 100644
  }
  
  static void set_displayed_framebuffer(unsigned n)
-@@ -274,15 +390,18 @@
+@@ -274,15 +390,19 @@
  
      printf("framebuffer: %d (%d x %d)\n", fb_fd, gr_draw->width, gr_draw->height);
  
 -    fbdev_blank(backend, true);
 -    fbdev_blank(backend, false);
--
++    (void)backend;
+ 
      smem_len = fi.smem_len;
  
      return gr_draw;
@@ -2391,7 +2392,7 @@ index 499e0ea..b2a4f1c 100644
  #if defined(RECOVERY_BGRA)
      // In case of BGRA, do some byte swapping
      unsigned char* ucfb_vaddr = (unsigned char*)gr_draw->data;
-@@ -297,16 +416,33 @@
+@@ -297,16 +417,33 @@
          // Copy from the in-memory surface to the framebuffer.
          memcpy(gr_framebuffer[1-displayed_buffer].data, gr_draw->data,
                 gr_draw->height * gr_draw->row_bytes);

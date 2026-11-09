@@ -109,14 +109,22 @@ sony_root = os.path.join(tree_root, "device", "sony")
 VENDOR_SETUP_SH = """#!/system/bin/sh
 #
 # Mounts Sony Yoshino (MSM8998) firmware/vendor partitions and stages
-# Adreno 540 EGL/GLES/Gralloc libraries + writable Qualcomm WLAN config.
+# Adreno 540 EGL/GLES/Gralloc libraries + writable Qualcomm/Sony WLAN stack.
 #
+
+umask 022
 
 if [ ! -e /dev/block/bootdevice ] && [ -e /dev/block/platform/soc/1da4000.ufshc ]; then
     ln -sf /dev/block/platform/soc/1da4000.ufshc /dev/block/bootdevice
 fi
 
-mkdir -p /firmware /vendor/firmware_mnt /persist /mnt/vendor/persist /dsp /mnt/vendor_gpu
+for f in /sys/bus/msm_subsys/devices/subsys*/restart_level; do
+    [ -w "$f" ] && echo RELATED > "$f" 2>/dev/null || true
+done
+
+chmod 0666 /sys/power/wake_lock /sys/power/wake_unlock 2>/dev/null || true
+
+mkdir -p /firmware /vendor/firmware_mnt /persist /mnt/vendor/persist /dsp /mnt/vendor_gpu /vendor/bin
 
 if ! grep -q " /firmware " /proc/mounts 2>/dev/null; then
     mount -t vfat -o ro,shortname=lower,uid=1000,gid=1000,dmask=227,fmask=337 /dev/block/bootdevice/by-name/modem /firmware 2>/dev/null || \\
@@ -128,7 +136,7 @@ if ! grep -q " /persist " /proc/mounts 2>/dev/null; then
     mount -t ext4 -o noatime,nosuid,nodev /dev/block/bootdevice/by-name/persist /persist 2>/dev/null || \\
     mount -t ext4 -o ro /dev/block/bootdevice/by-name/persist /persist 2>/dev/null || true
 fi
-for d in data iar_db hlos_rfs rfs; do
+for d in data iar_db hlos_rfs rfs wlan; do
     if [ -e "/persist/$d" ] && [ ! -e "/mnt/vendor/persist/$d" ]; then
         ln -sfn "/persist/$d" "/mnt/vendor/persist/$d"
     fi
@@ -145,6 +153,15 @@ if ! grep -q " /mnt/vendor_gpu " /proc/mounts 2>/dev/null; then
     mount -o ro /dev/block/bootdevice/by-name/oem /mnt/vendor_gpu 2>/dev/null || true
 fi
 
+# Stage Qualcomm/Sony modem and WLAN daemons into /vendor/bin in RAM without
+# squashfs security.capability xattrs that conflict with Linux 4.4 PR_CAP_AMBIENT.
+for b in irsc_util rmt_storage pd-mapper pm-service pm-proxy qrtr-ns tftp_server cnss-daemon tad ta_qmi_service sct_service mlog_qmi_service; do
+    if [ -f "/mnt/vendor_gpu/bin/$b" ]; then
+        cp -f "/mnt/vendor_gpu/bin/$b" "/vendor/bin/$b"
+        chmod 0755 "/vendor/bin/$b"
+    fi
+done
+
 mkdir -p /vendor/lib64/hw /vendor/lib64/egl
 if [ -f /system/lib64/android.hardware.keymaster@3.0-impl.so ] && [ ! -e /vendor/lib64/hw/android.hardware.keymaster@3.0-impl.so ]; then
     ln -sfn /system/lib64/android.hardware.keymaster@3.0-impl.so /vendor/lib64/hw/android.hardware.keymaster@3.0-impl.so
@@ -152,7 +169,7 @@ fi
 
 # libhardware rejects HAL symlinks resolving outside /vendor/lib64/hw; copy gralloc into RAM.
 if [ -f /mnt/vendor_gpu/lib64/hw/gralloc.msm8998.so ]; then
-    cp -af /mnt/vendor_gpu/lib64/hw/gralloc.msm8998.so /vendor/lib64/hw/gralloc.msm8998.so
+    cp -f /mnt/vendor_gpu/lib64/hw/gralloc.msm8998.so /vendor/lib64/hw/gralloc.msm8998.so
     chmod 0644 /vendor/lib64/hw/gralloc.msm8998.so
 fi
 
@@ -209,7 +226,7 @@ done
 for ini_src in /mnt/vendor_gpu/etc/wifi/WCNSS_qcom_cfg.ini /mnt/vendor_gpu/firmware/wlan/qca_cld/WCNSS_qcom_cfg.ini /mnt/vendor_gpu/etc/firmware/wlan/qca_cld/WCNSS_qcom_cfg.ini; do
     if [ -f "$ini_src" ]; then
         rm -f /vendor/etc/wifi/WCNSS_qcom_cfg.ini
-        cp -af "$ini_src" /vendor/etc/wifi/WCNSS_qcom_cfg.ini
+        cp -f "$ini_src" /vendor/etc/wifi/WCNSS_qcom_cfg.ini
         chmod 0644 /vendor/etc/wifi/WCNSS_qcom_cfg.ini
         break
     fi
@@ -218,7 +235,7 @@ ln -sfn /vendor/etc/wifi/WCNSS_qcom_cfg.ini /vendor/firmware/wlan/qca_cld/WCNSS_
 
 for mac_src in /persist/wlan_mac.bin /mnt/vendor/persist/wlan_mac.bin /mnt/vendor_gpu/firmware/wlan/qca_cld/wlan_mac.bin /mnt/vendor_gpu/etc/firmware/wlan/qca_cld/wlan_mac.bin; do
     if [ -f "$mac_src" ]; then
-        cp -af "$mac_src" /vendor/firmware/wlan/qca_cld/wlan_mac.bin
+        cp -f "$mac_src" /vendor/firmware/wlan/qca_cld/wlan_mac.bin
         chmod 0644 /vendor/firmware/wlan/qca_cld/wlan_mac.bin
         break
     fi
@@ -226,12 +243,13 @@ done
 
 if [ ! -f /vendor/etc/wifi/wpa_supplicant.conf ]; then
     if [ -f /mnt/vendor_gpu/etc/wifi/wpa_supplicant.conf ]; then
-        cp -af /mnt/vendor_gpu/etc/wifi/wpa_supplicant.conf /vendor/etc/wifi/wpa_supplicant.conf
+        cp -f /mnt/vendor_gpu/etc/wifi/wpa_supplicant.conf /vendor/etc/wifi/wpa_supplicant.conf
     else
         printf 'ctrl_interface=/tmp/recovery/sockets\\nupdate_config=1\\npmf=1\\n' > /vendor/etc/wifi/wpa_supplicant.conf
     fi
-    chmod 0660 /vendor/etc/wifi/wpa_supplicant.conf
 fi
+chmod 0644 /vendor/etc/wifi/wpa_supplicant.conf 2>/dev/null || true
+chmod 0755 /vendor /vendor/bin /vendor/etc /vendor/etc/wifi /vendor/firmware /vendor/firmware/wlan /vendor/firmware/wlan/qca_cld /vendor/lib64 /vendor/lib64/egl /vendor/lib64/hw 2>/dev/null || true
 
 exit 0
 """
